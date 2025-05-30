@@ -120,6 +120,11 @@ print(torch.cuda.get_device_name(0))   # NVIDIA GPU 이름 출력
 
 ---
 
+### YOLOv8 학습모델
+
+YOLOv8 학습 모델은 해당 구글 드라이브 링크에 포함되어 있는 "best.pt"를 사용하면 됩니다.
+https://drive.google.com/file/d/1r6eOJzkgqLAUa0SOGsp6F-SsBC6zXglW/view?usp=drive_link
+
 ## 📌 Git 작업 시 유의사항 목차 (작성 예정)
 
 - [ ] Branch 네이밍 규칙
