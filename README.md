@@ -8,23 +8,16 @@
 개발 환경은 Jupyter Lab 기반이며, Flask 서버를 통해 시뮬레이터와 실시간으로 연동됩니다.
 GitHub를 통한 협업이 이루어지고 있으며, 모든 작업은 브랜치 기반으로 이루어져야 합니다.
 
-📌 작업 시 유의사항 (목차만 정리)
-브랜치 네이밍 규칙 및 병합 방식
 
-시뮬레이터 연동 테스트 방법
+⚙️ 개발 환경 구성 가이드 (Windows 10 + WSL2 + Ubuntu + YOLOv8)
+이 프로젝트는 Windows 10 환경에서 WSL2를 활용한 Ubuntu 가상환경에서 개발되며,
+Jupyter Lab 상에서 YOLOv8 객체 탐지 모델 학습 및 Flask 서버 연동을 통해 자율 주행 테스트를 진행합니다.
 
-A* 경로 탐색 로직 수정 시 주의점
+✅ 1. WSL2 설치 및 Ubuntu 환경 구성
+# WSL2 설치 (관리자 PowerShell)
+wsl --install
 
-YOLO 모델 변경 시 고려 사항
+# 재부팅 후 Ubuntu 설치
+wsl --install -d Ubuntu-20.04
 
-서버 API 스펙 및 변경 가이드
-
-데이터 포맷(JSON) 통신 규약
-
-Jupyter 환경에서 Flask 실행 주의사항
-
-모델 학습 결과 공유 방식
-
-코드 주석 및 커밋 메시지 컨벤션
-
-버그 리포트 및 이슈 템플릿 작성법
+이후 Ubuntu 터미널을 실행하여 초기 사용자 및 비밀번호 설정
