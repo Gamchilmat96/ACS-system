@@ -120,6 +120,11 @@ print(torch.cuda.get_device_name(0))   # NVIDIA GPU 이름 출력
 
 ---
 
+### 이미지 데이터
+
+YOLOv8 학습을 위한 이밎, 라벨 데이터는 해당 구글 드라이브 링크에 포함되어 있는 "data_set"를 사용하면 됩니다.
+https://drive.google.com/drive/folders/1EgZXMk7Odpa1UGMKK0g0PtYBIBWwclvr?usp=drive_link
+
 ### YOLOv8 학습모델
 
 YOLOv8 학습 모델은 해당 구글 드라이브 링크에 포함되어 있는 "best.pt"를 사용하면 됩니다.
