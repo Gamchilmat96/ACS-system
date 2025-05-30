@@ -63,7 +63,7 @@ conda activate {가상환경 이름}
 conda install -c conda-forge jupyterlab -y
 ```
 
-5️⃣ YOLOv8 및 필요 패키 설치 (Ultralytics)
+5️⃣ YOLOv8 및 필요 패키지 설치 (Ultralytics)
 ```bash
 pip install ultralytics
 
