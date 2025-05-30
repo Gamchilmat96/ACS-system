@@ -14,10 +14,13 @@ GitHub를 통한 협업이 이루어지고 있으며, 모든 작업은 브랜치
 Jupyter Lab 상에서 YOLOv8 객체 탐지 모델 학습 및 Flask 서버 연동을 통해 자율 주행 테스트를 진행합니다.
 
 ✅ 1. WSL2 설치 및 Ubuntu 환경 구성
+
 # WSL2 설치 (관리자 PowerShell)
+```bash
 wsl --install
-
+```
 # 재부팅 후 Ubuntu 설치
+```bash
 wsl --install -d Ubuntu-20.04
-
+```
 이후 Ubuntu 터미널을 실행하여 초기 사용자 및 비밀번호 설정
