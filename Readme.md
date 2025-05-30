@@ -63,13 +63,18 @@ conda activate {가상환경 이름}
 conda install -c conda-forge jupyterlab -y
 ```
 
-5️⃣ YOLOv8 설치 (Ultralytics)
+5️⃣ YOLOv8 및 필요 패키 설치 (Ultralytics)
 ```bash
 pip install ultralytics
+
+#anaconda 환경에서 진행
+conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
 ```
 
 6️⃣ Jupyter Lab 실행
 ```bash
 jupyter lab --no_browser --ip=0.0.0.0
 ```
+
+
 
