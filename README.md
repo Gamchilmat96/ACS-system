@@ -13,6 +13,16 @@ GitHub를 통한 협업이 이루어지고 있으며, 모든 작업은 브랜치
 이 프로젝트는 Windows 10 환경에서 WSL2를 활용한 Ubuntu 가상환경에서 개발되며,
 Jupyter Lab 상에서 YOLOv8 객체 탐지 모델 학습 및 Flask 서버 연동을 통해 자율 주행 테스트를 진행합니다.
 
+
+| 항목     | 내용                               |
+| ------ | -------------------------------- |
+| OS     | Windows 10 + WSL2 + Ubuntu 20.04 |
+| Python | 3.10 (Anaconda 가상환경)             |
+| 프레임워크  | Jupyter Lab + Ultralytics YOLOv8 |
+| 사용 모델  | YOLOv8 (`best.pt` 사용 가능)         |
+| 서버     | Flask 기반 서버 연동                   |
+
+
 1️⃣ WSL2 + Ubuntu 설치
 
 ```bash
@@ -63,10 +73,3 @@ pip install ultralytics
 jupyter lab --no_browser --ip=0.0.0.0
 ```
 
-| 항목     | 내용                               |
-| ------ | -------------------------------- |
-| OS     | Windows 10 + WSL2 + Ubuntu 20.04 |
-| Python | 3.10 (Anaconda 가상환경)             |
-| 프레임워크  | Jupyter Lab + Ultralytics YOLOv8 |
-| 사용 모델  | YOLOv8 (`best.pt` 사용 가능)         |
-| 서버     | Flask 기반 서버 연동                   |
