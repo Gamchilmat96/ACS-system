@@ -133,7 +133,7 @@ print(torch.cuda.get_device_name(0))   # NVIDIA GPU 이름 출력
 > 📎 추후 실제 협업 시 위 항목을 문서화하여 반영 예정입니다.
 
 ---
-###시뮬레이터 Lidar 참고
+## 시뮬레이터 Lidar 참고
 
 ![image](https://github.com/user-attachments/assets/9b9ea699-5ae1-4489-8a56-f738a5b8af8f)
 
