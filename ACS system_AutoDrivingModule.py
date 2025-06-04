@@ -117,9 +117,14 @@ def a_star(start: tuple, goal: tuple) -> list:
         for neighbor_pos in get_neighbors(current.position):
             if neighbor_pos in closed_set:
                 continue
+
+            dx = neighbor_pos[0] - current.position[0]
+            dz = neighbor_pos[1] - current.position[1]
+            step_cost = math.sqrt(dx * dx + dz * dz)  # 이동 거리 = 1 또는 √2
+            
             # 새 노드 생성 및 비용 계산
             neighbor = Node(neighbor_pos, current)
-            neighbor.g = current.g + 1
+            neighbor.g = current.g + step_cost # 기존의 고정값 1이 아닌 이동거리에 따른 가중치를 반영
             neighbor.h = heuristic(neighbor_pos, goal)
             neighbor.f = neighbor.g + neighbor.h
             open_set.put((neighbor.f, neighbor))
