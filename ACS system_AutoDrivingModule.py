@@ -50,10 +50,12 @@ def heuristic(a: tuple, b: tuple) -> float:
 
 def get_neighbors(pos: tuple) -> list:
     """
-    현재 셀(pos)에서 이동 가능한 이웃 셀(상/하/좌/우) 목록 반환.
+    현재 셀(pos)에서 이동 가능한 이웃 셀(상/하/좌/우/대각선) 목록 반환.
     맵 경계 및 장애물(maze == 1) 검사 포함.
     """
-    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    # 대각선 포함 8방향 탐색으로 수정(기존의 4방향이 아닌 대각선 탐색까지 할 수 있게 변경(2025_06_04))
+    directions = [(-1, 0), (1, 0), (0, -1), (0, 1),
+                (-1, -1), (-1, 1), (1, -1), (1, 1)]
     neighbors = []
     for dx, dz in directions:
         nx, nz = pos[0] + dx, pos[1] + dz
