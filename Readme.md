@@ -148,6 +148,10 @@ https://drive.google.com/file/d/1r6eOJzkgqLAUa0SOGsp6F-SsBC6zXglW/view?usp=drive
 > 📎 추후 실제 협업 시 위 항목을 문서화하여 반영 예정입니다.
 
 ---
+## 시뮬레이터 Lidar 참고
+
+![image](https://github.com/user-attachments/assets/9b9ea699-5ae1-4489-8a56-f738a5b8af8f)
+
 
 ## 📮 문의
 본 프로젝트는 군집 자율 탐색 및 교전 로직 구현을 위한 내부 R&D 용도로 제작되었습니다.
