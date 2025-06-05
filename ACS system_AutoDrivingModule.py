@@ -259,8 +259,8 @@ def get_action():
 
     # 1) 목표 도달 여부
     dist_to_goal = math.hypot(x - destination_world[0], z - destination_world[1])
-    if dist_to_goal < TARGET_THRESHOLD:
-        # 목표 도달 시 모든 행동 정지
+    if dist_to_goal < TARGET_THRESHOLD: #값을 세분화해서 정지명령 구체화를 목표
+        print(f"[INFO] 목표 도달: 거리 {dist_to_goal:.2f}m → 정지 명령 전송")
         return jsonify({
             'moveWS': {'command': '', 'weight': 0.0},
             'moveAD': {'command': '', 'weight': 0.0},
