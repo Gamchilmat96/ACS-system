@@ -134,6 +134,7 @@ https://drive.google.com/file/d/1r6eOJzkgqLAUa0SOGsp6F-SsBC6zXglW/view?usp=drive
 
 현재 Tank Challenge 시뮬레이터는 시뮬레이터 설정으로 Lidar sensor의 탐지 범위를 설정할 수 있습니다.
 ![image](https://github.com/user-attachments/assets/62da08a5-6fe1-4201-9b50-372b43cc0ab1)
+
 위 사진과 같이 Y position, Channel, Minimap Channel, Max Distance, Lidar position으로 나누어집니다.
 
 Y position : Lidar sensor의 위치를 Y축 기준으로 세팅할 수 있습니다. 해당 값이 지나치게 낮으면 지면에 크게 영향을 받고 반대로 지나치게 높으면 재대로 탐지를 못할 가능성이 커집니다.
