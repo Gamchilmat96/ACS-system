@@ -25,7 +25,7 @@ TARGET_THRESHOLD = 10.0            # 목표 도달로 간주할 거리 임계값
 
 device_yaw = 0.0    # 전차 현재 방향(도 단위)
 previous_pos = None  # 마지막 위치 저장 (x, z)
-
+goal_reached = False # 전차의 목적지 도달여부를 판단하기 위한 전역변수
 # ----------------------------------------------------------------------------
 # 헬퍼 함수들
 # ----------------------------------------------------------------------------
@@ -258,9 +258,13 @@ def get_action():
     x, z = float(pos.get('x', 0)), float(pos.get('z', 0))
 
     # 1) 목표 도달 여부
+    # 서버 측에서 도달 이후 goal_reached = True 상태를 저장하고,
+    # 이후에는 전혀 명령을 주지 않게(또는 상태 고정) 처리
     dist_to_goal = math.hypot(x - destination_world[0], z - destination_world[1])
-    if dist_to_goal < TARGET_THRESHOLD: #값을 세분화해서 정지명령 구체화를 목표
-        print(f"[INFO] 목표 도달: 거리 {dist_to_goal:.2f}m → 정지 명령 전송")
+    if dist_to_goal < TARGET_THRESHOLD:
+        if not goal_reached:
+            print(f"[INFO] 목표 도달: 거리 {dist_to_goal:.2f}m → 최초 정지 명령 전송")
+            goal_reached = True
         return jsonify({
             'moveWS': {'command': '', 'weight': 0.0},
             'moveAD': {'command': '', 'weight': 0.0},
@@ -268,6 +272,8 @@ def get_action():
             'turretRF': {'command': '', 'weight': 0.0},
             'fire': False
         })
+    else:
+        goal_reached = False  # 다시 움직일 경우 플래그 초기화
 
     # 2) yaw 업데이트 (이전 위치가 있다면)
     if previous_pos:
