@@ -137,11 +137,11 @@ https://drive.google.com/file/d/1r6eOJzkgqLAUa0SOGsp6F-SsBC6zXglW/view?usp=drive
 
 위 사진과 같이 Y position, Channel, Minimap Channel, Max Distance, Lidar position으로 나누어집니다.
 
-Y position : Lidar sensor의 위치를 Y축 기준으로 세팅할 수 있습니다. 해당 값이 지나치게 낮으면 지면에 크게 영향을 받고 반대로 지나치게 높으면 재대로 탐지를 못할 가능성이 커집니다.
-Channel : Lidar sensor는 기본으로 상하로 22.5도 범위를 탐색합니다. Channel 값을 통해 해당 범위를 얼마나 세분화 할 수 있는지 정할 수 있습니다. 값이 지나치게 낮으면 탐지 가능성이 작아지고 값이 지나치게 크면 오브젝트 탐지를 구분하지 못할 수 있습니다.
-Minimap Channel : 시뮬레이터 미니맵으로 표시할 채널을 설정할 수 있습니다. 시각화와 관련한 설정이기에 실제 성능에 영향을 주지 않습니다.
-Max Distance : Lidar sensor가 감지할 수 있는 최대거리를 설정하는 값입니다. 
-Lidar position : Lidar sensor의 기본 위치를 Turret으로 할지 Body에 할지 정하는 설정입니다. Turret을 선택하게 되면 라이다의 방향이 Turret의 회전에 따라서 변경되고 Body를 선택하면 Turret의 회전과 상관없이 전차 몸체의 방향에 따라 Foward가 설정 됩니다.
+- Y position : Lidar sensor의 위치를 Y축 기준으로 세팅할 수 있습니다. 해당 값이 지나치게 낮으면 지면에 크게 영향을 받고 반대로 지나치게 높으면 재대로 탐지를 못할 가능성이 커집니다.
+- Channel : Lidar sensor는 기본으로 상하로 22.5도 범위를 탐색합니다. Channel 값을 통해 해당 범위를 얼마나 세분화 할 수 있는지 정할 수 있습니다. 값이 지나치게 낮으면 탐지 가능성이 작아지고 값이 지나치게 크면 오브젝트 탐지를 구분하지 못할 수 있습니다.
+- Minimap Channel : 시뮬레이터 미니맵으로 표시할 채널을 설정할 수 있습니다. 시각화와 관련한 설정이기에 실제 성능에 영향을 주지 않습니다.
+- Max Distance : Lidar sensor가 감지할 수 있는 최대거리를 설정하는 값입니다. 
+- Lidar position : Lidar sensor의 기본 위치를 Turret으로 할지 Body에 할지 정하는 설정입니다. Turret을 선택하게 되면 라이다의 방향이 Turret의 회전에 따라서 변경되고 Body를 선택하면 Turret의 회전과 상관없이 전차 몸체의 방향에 따라 Foward가 설정 됩니다.
 
 현재 추천하는 세팅은 Y position = 1, Channel = 11, Lidar Position =  Turret 입니다.
 
