@@ -8,6 +8,7 @@ import os
 import torch
 from ultralytics import YOLO
 import json
+import re #라이더 데이터를 새로운 포멧으로 읽어오기 위한 모듈 import(2025_06_09)
 
 app = Flask(__name__)
 # YOLO 객체 탐지 모델 로드 (Ultralytics YOLOv8)
@@ -20,15 +21,50 @@ GRID_SIZE = 300  # 2D 격자 맵 크기 (NxN)
 # 0: 이동 가능, 1: 장애물
 maze = [[0] * GRID_SIZE for _ in range(GRID_SIZE)]
 
-destination_world = (250.0, 200.0)  # 최종 목표 지점 (world 좌표)
+current_dest_index = 0             # 현재 목표 인덱스(2025_06_09)
+
+# 순차 경로 탐색할 목적지 목록(2025_06_09)
+DESTINATIONS = [
+    (10.0, 250.0),
+    (250.0, 250.0),
+    (250.0, 10.0)
+]
+
 TARGET_THRESHOLD = 10.0            # 목표 도달로 간주할 거리 임계값
 
 device_yaw = 0.0    # 전차 현재 방향(도 단위)
 previous_pos = None  # 마지막 위치 저장 (x, z)
 goal_reached = False # 전차의 목적지 도달여부를 판단하기 위한 전역변수
+
+# ----- LiDAR 데이터 불러오기 -----(2025_06_09)
+LIDAR_DATA_DIR = "./lidar_data"
+_LIDAR_PATTERN = re.compile(r"LidarData_t(\d+)_(\d+)\.json")
+
 # ----------------------------------------------------------------------------
 # 헬퍼 함수들
 # ----------------------------------------------------------------------------
+#(2025_06_09) 최신 라이더 데이터를 읽어들여오는 함수
+def get_latest_lidar_data_filepath(directory: str) -> str:
+    """
+    주어진 디렉토리에서 'LidarData_t<N>_<M>.json' 패턴에 맞는 최신 파일 경로 반환
+    """
+    latest_file = None
+    latest_t, latest_f = -1, -1
+    try:
+        if not os.path.isdir(directory):
+            return None
+        for fn in os.listdir(directory):
+            m = _LIDAR_PATTERN.match(fn)
+            if not m:
+                continue
+            t_val, f_val = int(m.group(1)), int(m.group(2))
+            if (t_val > latest_t) or (t_val == latest_t and f_val > latest_f):
+                latest_t, latest_f = t_val, f_val
+                latest_file = os.path.join(directory, fn)
+    except Exception:
+        return None
+    return latest_file
+    
 def world_to_grid(x: float, z: float) -> tuple:
     """
     세계 좌표 (x, z)를 그리드 인덱스 (i, j)로 변환.
@@ -53,8 +89,9 @@ def get_neighbors(pos: tuple) -> list:
     현재 셀(pos)에서 이동 가능한 이웃 셀(상/하/좌/우/대각선) 목록 반환.
     맵 경계 및 장애물(maze == 1) 검사 포함.
     """
-    # 대각선 제외 4방향 탐색으로 수정 -> 8방향 설정시 경로 탐색시 오류 발생해서 이후 재적용 예정)
-    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    # 대각선 제외 4방향 탐색으로 수정 -> 8방향 설정시 경로 탐색시 오류 발생해서 이후 재적용 예정(8방향으로 수정완료, 2025_06_09))
+    directions = [(-1, 0), (1, 0), (0, -1), (0, 1),
+                  (1, 1), (1, -1), (-1, 1), (-1, -1)]
     neighbors = []
     for dx, dz in directions:
         nx, nz = pos[0] + dx, pos[1] + dz
@@ -259,7 +296,11 @@ def get_action():
     # 1) 목표 도달 여부
     # 서버 측에서 도달 이후 goal_reached = True 상태를 저장하고,
     # 이후에는 전혀 명령을 주지 않게(또는 상태 고정) 처리
-    dist_to_goal = math.hypot(x - destination_world[0], z - destination_world[1])
+    
+    # DESTINATIONS에 저장되어 있는 목적지를 순차적으로 탐색(2025_06_09)
+    dest_x, dest_z = DESTINATIONS[current_dest_index]
+    dist_to_goal = math.hypot(x-dest_x, z-dest_z)
+    
     if dist_to_goal < TARGET_THRESHOLD:
         if not goal_reached:
             print(f"[INFO] 목표 도달: 거리 {dist_to_goal:.2f}m → 최초 정지 명령 전송")
@@ -281,9 +322,43 @@ def get_action():
             device_yaw = (math.degrees(math.atan2(dz, dx)) + 360) % 360
     previous_pos = (x, z)
 
+    # LiDAR 데이터 반영: 장애물 업데이트(2025_06_09)
+    lidar_fp = get_latest_lidar_data_filepath(LIDAR_DATA_DIR)
+    if lidar_fp:
+        try:
+            with open(lidar_fp, 'r', encoding='utf-8') as lf:
+                jd = json.load(lf)
+                points = jd.get('data') if isinstance(jd, dict) else jd
+                for p in points or []:
+                    if p.get('verticalAngle') == 0 and p.get('isDetected'):
+                        ang = math.radians((device_yaw + p.get('angle', 0.0)) % 360)
+                        dist = p.get('distance', 0.0)
+
+                        #라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언(2025_06_09)
+                        pos = p.get('position', {})
+                        x_val = pos.get('x')
+                        z_val = pos.get('z')
+                        print(f'장애물이 있는 X좌표는 {x_val}, Z좌표는 {z_val}입니다.')
+                        wx = x_val
+                        wz = z_val
+
+                        gi, gj = world_to_grid(wx, wz)
+                        maze[gi][gj] = 1
+
+                        print(f"Detected obstacle at world coords (x={wx:.2f}, z={wz:.2f}) -> grid (i={gi}, j={gj})")
+    
+        except Exception as e:
+            print(f"Error reading LiDAR data: {e}")
+
+    for i in range(300):
+        for j in range(300):
+            if maze[i][j] == 1:
+                print("장애물이 있는 좌표 :", f"({i},{j})")
+                
     # 3) A* 탐색
     start_cell = world_to_grid(x, z)
-    goal_cell = world_to_grid(*destination_world)
+    #순차적인 목적지의 값을 가져와야하기에 현재 목표로 설정된 dest_x, dest_z값으로 목표지점을 설정(2025_06_09)
+    goal_cell = world_to_grid(dest_x, dest_z)
     path = a_star(start_cell, goal_cell)
     # path[0] = 현재 셀, path[1] = 다음 셀 (이동 대상)
     next_cell = path[1] if len(path) > 1 else start_cell
