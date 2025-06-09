@@ -335,9 +335,10 @@ def get_action():
                         dist = p.get('distance', 0.0)
 
                         #라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언(2025_06_09)
-                        pos = p.get('position', {})
-                        x_val = pos.get('x')
-                        z_val = pos.get('z')
+                        #변수명을 중복으로 설정하는 문제 발생. pos 변수명을 lidar_pos로 변경(2025_06_09)
+                        lidar_pos = p.get('position', {})
+                        x_val = lidar_pos.get('x')
+                        z_val = lidar_pos.get('z')
                         print(f'장애물이 있는 X좌표는 {x_val}, Z좌표는 {z_val}입니다.')
                         wx = x_val
                         wz = z_val
