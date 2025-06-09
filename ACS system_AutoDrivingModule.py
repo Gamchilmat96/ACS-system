@@ -36,34 +36,37 @@ device_yaw = 0.0    # 전차 현재 방향(도 단위)
 previous_pos = None  # 마지막 위치 저장 (x, z)
 goal_reached = False # 전차의 목적지 도달여부를 판단하기 위한 전역변수
 
-# ----- LiDAR 데이터 불러오기 -----(2025_06_09)
-LIDAR_DATA_DIR = "./lidar_data"
-_LIDAR_PATTERN = re.compile(r"LidarData_t(\d+)_(\d+)\.json")
+# ----- LiDAR 데이터 불러오기 -----(2025_06_09) => 비활성화(2025_06_09)
+# LIDAR_DATA_DIR = "./lidar_data"
+# _LIDAR_PATTERN = re.compile(r"LidarData_t(\d+)_(\d+)\.json")
+
+#라이더 센서 데이터를 json파일에 대한 I/O 접근이 아닌 직접 읽어오기 위한 변수(2025_06_09)
+last_lidar_data = []
 
 # ----------------------------------------------------------------------------
 # 헬퍼 함수들
 # ----------------------------------------------------------------------------
-#(2025_06_09) 최신 라이더 데이터를 읽어들여오는 함수
-def get_latest_lidar_data_filepath(directory: str) -> str:
-    """
-    주어진 디렉토리에서 'LidarData_t<N>_<M>.json' 패턴에 맞는 최신 파일 경로 반환
-    """
-    latest_file = None
-    latest_t, latest_f = -1, -1
-    try:
-        if not os.path.isdir(directory):
-            return None
-        for fn in os.listdir(directory):
-            m = _LIDAR_PATTERN.match(fn)
-            if not m:
-                continue
-            t_val, f_val = int(m.group(1)), int(m.group(2))
-            if (t_val > latest_t) or (t_val == latest_t and f_val > latest_f):
-                latest_t, latest_f = t_val, f_val
-                latest_file = os.path.join(directory, fn)
-    except Exception:
-        return None
-    return latest_file
+#(2025_06_09) 최신 라이더 데이터를 읽어들여오는 함수 => 바활성화(2025_06_09)
+# def get_latest_lidar_data_filepath(directory: str) -> str:
+#     """
+#     주어진 디렉토리에서 'LidarData_t<N>_<M>.json' 패턴에 맞는 최신 파일 경로 반환
+#     """
+#     latest_file = None
+#     latest_t, latest_f = -1, -1
+#     try:
+#         if not os.path.isdir(directory):
+#             return None
+#         for fn in os.listdir(directory):
+#             m = _LIDAR_PATTERN.match(fn)
+#             if not m:
+#                 continue
+#             t_val, f_val = int(m.group(1)), int(m.group(2))
+#             if (t_val > latest_t) or (t_val == latest_t and f_val > latest_f):
+#                 latest_t, latest_f = t_val, f_val
+#                 latest_file = os.path.join(directory, fn)
+#     except Exception:
+#         return None
+#     return latest_file
     
 def world_to_grid(x: float, z: float) -> tuple:
     """
@@ -288,7 +291,10 @@ def get_action():
       4) 방향 차이 계산 → 이동 명령 생성
     반환: 이동/회전/사격 명령 JSON
     """
-    global previous_pos, device_yaw
+    global previous_pos, device_yaw, goal_reached, current_dest_index #전역 설정한 변수 추가(goal_reached, current_dest_index 추가 2025_06_09)
+    #실시간으로 라이더 데이터를 수신하기 위해서 last_lidar_data 선언(2025_06_09)
+    global last_lidar_data
+    
     data = request.get_json(force=True) or {}
     pos = data.get('position', {})
     x, z = float(pos.get('x', 0)), float(pos.get('z', 0))
@@ -322,40 +328,62 @@ def get_action():
             device_yaw = (math.degrees(math.atan2(dz, dx)) + 360) % 360
     previous_pos = (x, z)
 
-    # LiDAR 데이터 반영: 장애물 업데이트(2025_06_09)
-    lidar_fp = get_latest_lidar_data_filepath(LIDAR_DATA_DIR)
-    if lidar_fp:
-        try:
-            with open(lidar_fp, 'r', encoding='utf-8') as lf:
-                jd = json.load(lf)
-                points = jd.get('data') if isinstance(jd, dict) else jd
-                for p in points or []:
-                    if p.get('verticalAngle') == 0 and p.get('isDetected'):
+    # LiDAR 데이터 반영: 장애물 업데이트(2025_06_09) => 비활성화
+    # lidar_fp = get_latest_lidar_data_filepath(LIDAR_DATA_DIR)
+    # if lidar_fp:
+    #     try:
+    #         with open(lidar_fp, 'r', encoding='utf-8') as lf:
+    #             jd = json.load(lf)
+    #             points = jd.get('data') if isinstance(jd, dict) else jd
+    #             for p in points or []:
+    #                 if p.get('verticalAngle') == 0 and p.get('isDetected'):
+    #                     ang = math.radians((device_yaw + p.get('angle', 0.0)) % 360)
+    #                     dist = p.get('distance', 0.0)
+
+    #                     #라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언(2025_06_09)
+    #                     pos = p.get('position', {})
+    #                     x_val = pos.get('x')
+    #                     z_val = pos.get('z')
+    #                     print(f'장애물이 있는 X좌표는 {x_val}, Z좌표는 {z_val}입니다.')
+    #                     wx = x_val
+    #                     wz = z_val
+
+    #                     gi, gj = world_to_grid(wx, wz)
+    #                     maze[gi][gj] = 1
+
+    #                     print(f"Detected obstacle at world coords (x={wx:.2f}, z={wz:.2f}) -> grid (i={gi}, j={gj})")
+    
+    #     except Exception as e:
+    #         print(f"Error reading LiDAR data: {e}")
+    
+    #장애물 존재 좌표 검증 디버그 코드 비활성화(2025_06_09)
+    # for i in range(300):
+    #     for j in range(300):
+    #         if maze[i][j] == 1:
+    #             print("장애물이 있는 좌표 :", f"({i},{j})")
+                
+    # JSON이 아닌 실시간 LiDAR 데이터 반영: 장애물 업데이트(2025_06_09)
+    for p in last_lidar_data:
+        if p.get('verticalAngle') == 0 and p.get('isDetected'):
                         ang = math.radians((device_yaw + p.get('angle', 0.0)) % 360)
                         dist = p.get('distance', 0.0)
 
-                        #라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언(2025_06_09)
-                        #변수명을 중복으로 설정하는 문제 발생. pos 변수명을 lidar_pos로 변경(2025_06_09)
-                        lidar_pos = p.get('position', {})
-                        x_val = lidar_pos.get('x')
-                        z_val = lidar_pos.get('z')
-                        print(f'장애물이 있는 X좌표는 {x_val}, Z좌표는 {z_val}입니다.')
-                        wx = x_val
-                        wz = z_val
+    # 라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언
+    # (변수명 충돌 방지를 위해 pos → lidar_pos로 변경)
+    lidar_pos = p.get('position', {})
+    x_val = lidar_pos.get('x')
+    z_val = lidar_pos.get('z')
 
-                        gi, gj = world_to_grid(wx, wz)
-                        maze[gi][gj] = 1
+    # 디버그용 출력
+    print(f'장애물이 있는 X좌표는 {x_val}, Z좌표는 {z_val}입니다.')
 
-                        print(f"Detected obstacle at world coords (x={wx:.2f}, z={wz:.2f}) -> grid (i={gi}, j={gj})")
-    
-        except Exception as e:
-            print(f"Error reading LiDAR data: {e}")
+    # 월드 좌표 → 그리드로 변환
+    gi, gj = world_to_grid(x_val, z_val)
+    maze[gi][gj] = 1
 
-    for i in range(300):
-        for j in range(300):
-            if maze[i][j] == 1:
-                print("장애물이 있는 좌표 :", f"({i},{j})")
-                
+    print(f"Detected obstacle at world coords (x={x_val:.2f}, z={z_val:.2f}) -> grid (i={gi}, j={gj})")
+
+            
     # 3) A* 탐색
     start_cell = world_to_grid(x, z)
     #순차적인 목적지의 값을 가져와야하기에 현재 목표로 설정된 dest_x, dest_z값으로 목표지점을 설정(2025_06_09)
