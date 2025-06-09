@@ -368,15 +368,21 @@ def get_action():
                         ang = math.radians((device_yaw + p.get('angle', 0.0)) % 360)
                         dist = p.get('distance', 0.0)
 
-                        
-                        lidar_pos = p.get('position', {})
-                        x_val = lidar_pos.get('x')
-                        z_val = lidar_pos.get('z')
+    # 라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언
+    # (변수명 충돌 방지를 위해 pos → lidar_pos로 변경)
+    lidar_pos = p.get('position', {})
+    x_val = lidar_pos.get('x')
+    z_val = lidar_pos.get('z')
 
-                        gi, gj = world_to_grid(x_val, z_val)
-                        maze[gi][gj] = 1
+    # 디버그용 출력
+    print(f'장애물이 있는 X좌표는 {x_val}, Z좌표는 {z_val}입니다.')
 
-                        print(f"Detected obstacle at world coords (x={x_val:.2f}, z={z_val:.2f}) -> grid (i={gi}, j={gj})")
+    # 월드 좌표 → 그리드로 변환
+    gi, gj = world_to_grid(x_val, z_val)
+    maze[gi][gj] = 1
+
+    print(f"Detected obstacle at world coords (x={x_val:.2f}, z={z_val:.2f}) -> grid (i={gi}, j={gj})")
+
             
     # 3) A* 탐색
     start_cell = world_to_grid(x, z)
