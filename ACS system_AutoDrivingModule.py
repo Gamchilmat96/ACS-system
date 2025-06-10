@@ -235,7 +235,10 @@ def detect():
         output.append({
             'class': target_classes[cid],
             'bbox': [float(x1), float(y1), float(x2), float(y2)],
-            'confidence': float(box[4])
+            'confidence': float(box[4]),
+            'color': "#FF0000",
+            'filled': True,
+            'updateBoxWhileMoving': True
         })
 
     # 임시 이미지 제거
