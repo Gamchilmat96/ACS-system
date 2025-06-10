@@ -24,7 +24,7 @@ GRID_SIZE = 300  # 2D 격자 맵 크기 (NxN)
 maze = [[0]*GRID_SIZE for _ in range(GRID_SIZE)]
 
 current_dest_index = 0             # 현재 목표 인덱스(2025_06_09)
-TARGET_THRESHOLD = 10.0           # 목표 도달로 간주할 거리 임계값
+TARGET_THRESHOLD = 20.0           # 목표 도달로 간주할 거리 임계값
 
 # 순차 경로 탐색할 목적지 목록(2025_06_09)
 DESTINATIONS = [
@@ -39,8 +39,8 @@ previous_pos = None  # 마지막 위치 저장 (x, z)
 goal_reached = False # 전차의 목적지 도달여부를 판단하기 위한 전역변수
 
 # ----- LiDAR 데이터 불러오기 -----(2025_06_09)
-LIDAR_DATA_DIR = "./lidar_data"
-_LIDAR_PATTERN = re.compile(r"LidarData_t(\d+)_(\d+)\.json")
+# LIDAR_DATA_DIR = "./lidar_data"
+# _LIDAR_PATTERN = re.compile(r"LidarData_t(\d+)_(\d+)\.json")
 
 #라이더 센서 데이터를 json파일에 대한 I/O 접근이 아닌 직접 읽어오기 위한 변수(2025_06_09)
 last_lidar_data = []
@@ -70,6 +70,40 @@ last_lidar_data = []
 #         return None
 #     return latest_file
 
+#전방에 장애물에 여부를 판단하는 함수 선언 2025_06_10
+def obstacle_ahead(lidar_points, fov_deg=FOV_DEG, dist_thresh=DIST_THRESH):
+    """전방 ±fov_deg 범위 내에 dist_thresh 이하 장애물이 있으면 True 반환."""
+    front_dists = []
+    for p in lidar_points:
+        angle_view = p.get('angle')
+        if angle_view < 20 or angle_view > 340:
+            if not p.get('isDetected') or p.get('verticalAngle') != 0:
+                continue
+            ang = math.degrees(math.atan2(p['position']['z'], p['position']['x']))
+            front_dists.append(p['distance'])
+    return (min(front_dists) if front_dists else float('inf')) < dist_thresh
+#전방에 장애물이 존재하면 회피각도를 결정하는 함수 선언 2025_06_10
+def compute_avoidance_direction(lidar_points, current_yaw):
+    """
+    장애물이 많은 쪽 반대 방향으로 회피 각도를 결정.
+    (간단히 좌/우 평균 거리를 비교해서 더 넓은 쪽으로 회피)
+    """
+    left_dists, right_dists = [], []
+    for p in lidar_points:
+        if not p.get('isDetected') or p.get('verticalAngle') != 0:
+            continue
+        ang = math.degrees(math.atan2(p['position']['z'], p['position']['x']))
+        dist = math.hypot(p['position']['x'], p['position']['z'])
+        if ang > 0:
+            left_dists.append(dist)
+        else:
+            right_dists.append(dist)
+    # 장애물이 더 가까운 쪽을 피해 반대 방향으로 45° 회전
+    if (min(left_dists) if left_dists else float('inf')) < (min(right_dists) if right_dists else float('inf')):
+        return (current_yaw - 45) % 360
+    else:
+        return (current_yaw + 45) % 360
+        
 def world_to_grid(x: float, z: float) -> tuple:
     """
     세계 좌표 (x, z)를 그리드 인덱스 (i, j)로 변환.
@@ -374,20 +408,20 @@ def get_action():
     #         print(f"Error reading LiDAR data: {e}")
 
     # JSON이 아닌 실시간 LiDAR 데이터 반영: 장애물 업데이트(2025_06_09)
-    for p in last_lidar_data:
-        if p.get('verticalAngle') == 0 and p.get('isDetected'):
-                        ang = math.radians((device_yaw + p.get('angle', 0.0)) % 360)
-                        dist = p.get('distance', 0.0)
+    # for p in last_lidar_data:
+    #     if p.get('verticalAngle') == 0 and p.get('isDetected'):
+    #                     ang = math.radians((device_yaw + p.get('angle', 0.0)) % 360)
+    #                     dist = p.get('distance', 0.0)
 
-                        #라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언(2025_06_09)
-                        lidar_pos = p.get('position', {})
-                        x_val = lidar_pos.get('x')
-                        z_val = lidar_pos.get('z')
+    #                     #라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언(2025_06_09)
+    #                     lidar_pos = p.get('position', {})
+    #                     x_val = lidar_pos.get('x')
+    #                     z_val = lidar_pos.get('z')
 
-                        gi, gj = world_to_grid(x_val, z_val)
-                        maze[gi][gj] = 1
+    #                     gi, gj = world_to_grid(x_val, z_val)
+    #                     maze[gi][gj] = 1
 
-                        print(f"Detected obstacle at world coords (x={x_val:.2f}, z={z_val:.2f}) -> grid (i={gi}, j={gj})")
+    #                     print(f"Detected obstacle at world coords (x={x_val:.2f}, z={z_val:.2f}) -> grid (i={gi}, j={gj})")
 
     # A* 경로 탐색
     start_cell = world_to_grid(x, z)
@@ -402,17 +436,46 @@ def get_action():
     if diff > 180:
         diff -= 360
     print("계산 각도: ", (abs(diff) / 180))
-    # 이동/회전 명령 구성
-    cmd = {
-        'moveWS': {'command': 'W', 'weight': 0.5},  # 전진
-        'moveAD': {                                # 좌/우 회전 보조
+    # 5) 장애물 vs 경로 회전 분기 구간 설정(2025_06_10)
+    # LiDAR 포인트 리스트 형태로 last_lidar_data 사용
+    lidar_points = last_lidar_data 
+    print(obstacle_ahead(lidar_points)) 
+    if obstacle_ahead(lidar_points):
+        # 장애물 회피용 목표 각도
+        avoid_yaw = compute_avoidance_direction(lidar_points, device_yaw)
+        diff = ((avoid_yaw - device_yaw + 360) % 360)
+        if diff > 180:
+            diff -= 360
+        print(f"장애물을 탐지했습니다. 회피가 필요한 구간입니다. 회피각도는 {min(abs(diff) / 180.0, 1.0)}도 입니다.")
+        move_ad_cmd = {
             'command': 'A' if diff > 0 else 'D',
-            'weight': min(abs(diff) / 180, 1.0)
-        },
+            'weight': min(abs(diff) / MAX_DIFF, 1.0)
+        }
+
+        cmd = {
+        'moveWS': {'command': 'W', 'weight': 0.3},  # 전진
+        'moveAD': move_ad_cmd, #좌우 회전을 담당하는 변수로 교체(2025_06_10)
         'turretQE': {'command': '', 'weight': 0.0},
         'turretRF': {'command': '', 'weight': 0.0},
         'fire': False                           # 사격 비활성
     }
+    else:
+    # 6) 회전 임계치 적용 구간 설정(2025_06_10)
+        if abs(diff) < ANGLE_THRESHOLD:
+            move_ad_cmd = {'command': '', 'weight': 0.0}
+        else:
+            move_ad_cmd = {
+                'command': 'A' if diff > 0 else 'D',
+                'weight': min(abs(diff) / 180.0, 1.0)
+            }
+
+        cmd = {
+            'moveWS': {'command': 'W', 'weight': 0.3},  # 전진
+            'moveAD': move_ad_cmd,
+            'turretQE': {'command': '', 'weight': 0.0},
+            'turretRF': {'command': '', 'weight': 0.0},
+            'fire': False                           # 사격 비활성
+        }
     
     return jsonify(cmd)
 
