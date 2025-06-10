@@ -216,9 +216,9 @@ https://drive.google.com/file/d/1r6eOJzkgqLAUa0SOGsp6F-SsBC6zXglW/view?usp=drive
 
 ## 🗂️ 브랜치 작업 분할
 - 현재 작업 브랜치는 다음과 같이 기능별로 분할되어 있음:
-  - `autonomous-driving`: 자율주행 기능 개발
-  - `autonomous-exploration`: 자율탐색 기능 개발
-- 각 브랜치의 목적에 맞게 코드를 구성하고, **기능 간 분리를 유지**할 것
+  - `ACS system_AutoDriveModule`: 자율주행 기능 개발
+  - `ACS system_AutoDetectModule`: 자율탐색 기능 개발
+- 각 모듈의 목적에 맞게 코드를 구성하고, **기능 간 분리를 유지**할 것
 
 ---
 
