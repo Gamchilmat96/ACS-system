@@ -17,11 +17,14 @@ model = YOLO('best.pt')  # best.pt: 학습된 모델 파일
 # ----------------------------------------------------------------------------
 # 전역 설정
 # ----------------------------------------------------------------------------
+
 GRID_SIZE = 300  # 2D 격자 맵 크기 (NxN)
-# 0: 이동 가능, 1: 장애물
-maze = [[0] * GRID_SIZE for _ in range(GRID_SIZE)]
+
+# 실제 맵 => 0: 이동 가능, 1: 장애물
+maze = [[0]*GRID_SIZE for _ in range(GRID_SIZE)]
 
 current_dest_index = 0             # 현재 목표 인덱스(2025_06_09)
+TARGET_THRESHOLD = 10.0           # 목표 도달로 간주할 거리 임계값
 
 # 순차 경로 탐색할 목적지 목록(2025_06_09)
 DESTINATIONS = [
@@ -30,51 +33,52 @@ DESTINATIONS = [
     (250.0, 10.0)
 ]
 
-TARGET_THRESHOLD = 10.0            # 목표 도달로 간주할 거리 임계값
-
 device_yaw = 0.0    # 전차 현재 방향(도 단위)
 previous_pos = None  # 마지막 위치 저장 (x, z)
+
 goal_reached = False # 전차의 목적지 도달여부를 판단하기 위한 전역변수
 
 # ----- LiDAR 데이터 불러오기 -----(2025_06_09)
 LIDAR_DATA_DIR = "./lidar_data"
 _LIDAR_PATTERN = re.compile(r"LidarData_t(\d+)_(\d+)\.json")
 
+#라이더 센서 데이터를 json파일에 대한 I/O 접근이 아닌 직접 읽어오기 위한 변수(2025_06_09)
+last_lidar_data = []
+
 # ----------------------------------------------------------------------------
 # 헬퍼 함수들
 # ----------------------------------------------------------------------------
-#(2025_06_09) 최신 라이더 데이터를 읽어들여오는 함수
-def get_latest_lidar_data_filepath(directory: str) -> str:
-    """
-    주어진 디렉토리에서 'LidarData_t<N>_<M>.json' 패턴에 맞는 최신 파일 경로 반환
-    """
-    latest_file = None
-    latest_t, latest_f = -1, -1
-    try:
-        if not os.path.isdir(directory):
-            return None
-        for fn in os.listdir(directory):
-            m = _LIDAR_PATTERN.match(fn)
-            if not m:
-                continue
-            t_val, f_val = int(m.group(1)), int(m.group(2))
-            if (t_val > latest_t) or (t_val == latest_t and f_val > latest_f):
-                latest_t, latest_f = t_val, f_val
-                latest_file = os.path.join(directory, fn)
-    except Exception:
-        return None
-    return latest_file
-    
+#2025_06_09 최신 라이더 데이터를 읽어들여오는 함수
+# def get_latest_lidar_data_filepath(directory: str) -> str:
+#     """
+#     주어진 디렉토리에서 'LidarData_t<N>_<M>.json' 패턴에 맞는 최신 파일 경로 반환
+#     """
+#     latest_file = None
+#     latest_t, latest_f = -1, -1
+#     try:
+#         if not os.path.isdir(directory):
+#             return None
+#         for fn in os.listdir(directory):
+#             m = _LIDAR_PATTERN.match(fn)
+#             if not m:
+#                 continue
+#             t_val, f_val = int(m.group(1)), int(m.group(2))
+#             if (t_val > latest_t) or (t_val == latest_t and f_val > latest_f):
+#                 latest_t, latest_f = t_val, f_val
+#                 latest_file = os.path.join(directory, fn)
+#     except Exception:
+#         return None
+#     return latest_file
+
 def world_to_grid(x: float, z: float) -> tuple:
     """
     세계 좌표 (x, z)를 그리드 인덱스 (i, j)로 변환.
     맵 범위를 벗어날 경우 경계값으로 클램프(clamp).
     """
-    i = max(0, min(GRID_SIZE - 1, int(x)))
-    j = max(0, min(GRID_SIZE - 1, int(z)))
+    i = max(0, min(GRID_SIZE-1, int(x)))
+    j = max(0, min(GRID_SIZE-1, int(z)))
     return i, j
-
-
+   
 def heuristic(a: tuple, b: tuple) -> float:
     """
     A* 알고리즘 휴리스틱 함수.
@@ -99,7 +103,6 @@ def get_neighbors(pos: tuple) -> list:
         if 0 <= nx < GRID_SIZE and 0 <= nz < GRID_SIZE and maze[nx][nz] == 0:
             neighbors.append((nx, nz))
     return neighbors
-
 
 class Node:
     """
@@ -168,7 +171,6 @@ def a_star(start: tuple, goal: tuple) -> list:
     # 경로를 찾지 못한 경우 시작 위치 반환
     return [start]
 
-
 def calculate_angle(cur: tuple, nxt: tuple) -> float:
     """
     현재 셀(cur)에서 다음 셀(nxt)로 향하는 벡터의 yaw(방향) 각도 계산.
@@ -196,8 +198,8 @@ def init():
         "rdStartX": 250, "rdStartY": 10, "rdStartZ": 200,
         # 모드 설정
         "trackingMode": False,
-        "detactMode": False,
-        "logMode": False,
+        "detactMode": True,
+        "logMode": True,
         "enemyTracking": False,
         "saveSnapshot": False,
         "saveLog": False,
@@ -245,11 +247,23 @@ def detect():
 @app.route('/info', methods=['POST'])
 def info():
     """
-    LiDAR 및 기타 상태 데이터를 JSON으로 수신.
+    LiDAR 및 기타 상태 데이터를 실시간으로 수신.
     실제 로직 필요 시 전역 변수 업데이트.
     """
+    #실시간으로 라이더 데이터를 수신하기 위해서 last_lidar_data 선언(2025_06_09)
+    global last_lidar_data
     data = request.get_json(force=True) or {}
-    # 예: last_lidar_data.update(data)
+    #전체 info에서 lidar data 값만 취사 선택해서 리스트로 저장(2025_06_09)
+    points = data.get('lidarPoints', [])
+    last_lidar_data = points 
+
+    #  verticalAngle == 0인 포인트의 distance만 출력
+    # for p in points:
+    #     if p.get('verticalAngle') == 0:
+    #         dist = p.get('distance')
+    #         print(f"[INFO] verticalAngle=0인 포인트 거리: {dist}")
+    #         # 필요하다면 전역 변수에도 저장하거나 다른 처리 가능
+
     return jsonify({"status": "ok"})
 
 @app.route('/update_obstacle', methods=['POST'])
@@ -291,7 +305,9 @@ def get_action():
       4) 방향 차이 계산 → 이동 명령 생성
     반환: 이동/회전/사격 명령 JSON
     """
-    global previous_pos, device_yaw
+    global previous_pos, device_yaw, goal_reached, current_dest_index #전역 설정한 변수 추가(current_dest_index 추가 2025_06_09)
+    #실시간으로 라이더 데이터를 수신하기 위해서 last_lidar_data 선언(2025_06_09)
+    global last_lidar_data
     data = request.get_json(force=True) or {}
     pos = data.get('position', {})
     x, z = float(pos.get('x', 0)), float(pos.get('z', 0))
@@ -299,24 +315,28 @@ def get_action():
     # 1) 목표 도달 여부
     # 서버 측에서 도달 이후 goal_reached = True 상태를 저장하고,
     # 이후에는 전혀 명령을 주지 않게(또는 상태 고정) 처리
-    
+    # 현재 목표 설정
+
     # DESTINATIONS에 저장되어 있는 목적지를 순차적으로 탐색(2025_06_09)
     dest_x, dest_z = DESTINATIONS[current_dest_index]
     dist_to_goal = math.hypot(x-dest_x, z-dest_z)
-    
+
     if dist_to_goal < TARGET_THRESHOLD:
-        if not goal_reached:
+        print(f"[INFO] 목적지 {current_dest_index} 도달: ({dest_x},{dest_z})")
+        # 다음 목적지로 이동
+        if current_dest_index < len(DESTINATIONS)-1:
+            current_dest_index += 1
+            print(f"[INFO] 다음 목적지 인덱스: {current_dest_index}")
+        else:
             print(f"[INFO] 목표 도달: 거리 {dist_to_goal:.2f}m → 최초 정지 명령 전송")
             goal_reached = True
         return jsonify({
-            'moveWS': {'command': '', 'weight': 0.0},
-            'moveAD': {'command': '', 'weight': 0.0},
-            'turretQE': {'command': '', 'weight': 0.0},
-            'turretRF': {'command': '', 'weight': 0.0},
-            'fire': False
+            'moveWS':{'command':'','weight':0.0}, 'moveAD':{'command':'','weight':0.0},
+            'turretQE':{'command':'','weight':0.0}, 'turretRF':{'command':'','weight':0.0}, 'fire':False
         })
     else:
-        goal_reached = False  # 다시 움직일 경우 플래그 초기화
+        print("아직 전차가 목표지점으로 이동중입니다.")
+    goal_reached = False
 
     # 2) yaw 업데이트 (이전 위치가 있다면)
     if previous_pos:
@@ -326,53 +346,62 @@ def get_action():
     previous_pos = (x, z)
 
     # LiDAR 데이터 반영: 장애물 업데이트(2025_06_09)
-    lidar_fp = get_latest_lidar_data_filepath(LIDAR_DATA_DIR)
-    if lidar_fp:
-        try:
-            with open(lidar_fp, 'r', encoding='utf-8') as lf:
-                jd = json.load(lf)
-                points = jd.get('data') if isinstance(jd, dict) else jd
-                for p in points or []:
-                    if p.get('verticalAngle') == 0 and p.get('isDetected'):
+    # lidar_fp = get_latest_lidar_data_filepath(LIDAR_DATA_DIR)
+    # if lidar_fp:
+    #     try:
+    #         with open(lidar_fp, 'r', encoding='utf-8') as lf:
+    #             jd = json.load(lf)
+    #             points = jd.get('data') if isinstance(jd, dict) else jd
+    #             for p in points or []:
+    #                 if p.get('verticalAngle') == 0 and p.get('isDetected'):
+    #                     ang = math.radians((device_yaw + p.get('angle', 0.0)) % 360)
+    #                     dist = p.get('distance', 0.0)
+
+    #                     #라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언(2025_06_09)
+    #                     lidar_pos = p.get('position', {})
+    #                     x_val = lidar_pos.get('x')
+    #                     z_val = lidar_pos.get('z')
+    #                     #print(f'장애물이 있는 X좌표는 {x_val}, Z좌표는 {z_val}입니다.')
+    #                     wx = x_val
+    #                     wz = z_val
+
+    #                     gi, gj = world_to_grid(wx, wz)
+    #                     maze[gi][gj] = 1
+
+    #                     #print(f"Detected obstacle at world coords (x={wx:.2f}, z={wz:.2f}) -> grid (i={gi}, j={gj})")
+    
+    #     except Exception as e:
+    #         print(f"Error reading LiDAR data: {e}")
+
+    # JSON이 아닌 실시간 LiDAR 데이터 반영: 장애물 업데이트(2025_06_09)
+    for p in last_lidar_data:
+        if p.get('verticalAngle') == 0 and p.get('isDetected'):
                         ang = math.radians((device_yaw + p.get('angle', 0.0)) % 360)
                         dist = p.get('distance', 0.0)
 
                         #라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언(2025_06_09)
-                        #변수명을 중복으로 설정하는 문제 발생. pos 변수명을 lidar_pos로 변경(2025_06_09)
                         lidar_pos = p.get('position', {})
                         x_val = lidar_pos.get('x')
                         z_val = lidar_pos.get('z')
-                        print(f'장애물이 있는 X좌표는 {x_val}, Z좌표는 {z_val}입니다.')
-                        wx = x_val
-                        wz = z_val
 
-                        gi, gj = world_to_grid(wx, wz)
+                        gi, gj = world_to_grid(x_val, z_val)
                         maze[gi][gj] = 1
 
-                        print(f"Detected obstacle at world coords (x={wx:.2f}, z={wz:.2f}) -> grid (i={gi}, j={gj})")
-    
-        except Exception as e:
-            print(f"Error reading LiDAR data: {e}")
+                        print(f"Detected obstacle at world coords (x={x_val:.2f}, z={z_val:.2f}) -> grid (i={gi}, j={gj})")
 
-    for i in range(300):
-        for j in range(300):
-            if maze[i][j] == 1:
-                print("장애물이 있는 좌표 :", f"({i},{j})")
-                
-    # 3) A* 탐색
+    # A* 경로 탐색
     start_cell = world_to_grid(x, z)
-    #순차적인 목적지의 값을 가져와야하기에 현재 목표로 설정된 dest_x, dest_z값으로 목표지점을 설정(2025_06_09)
     goal_cell = world_to_grid(dest_x, dest_z)
     path = a_star(start_cell, goal_cell)
-    # path[0] = 현재 셀, path[1] = 다음 셀 (이동 대상)
+    print(f"[DEBUG] A* path: {path[:5]}")  #← 경로가 제대로 잡히는지 확인
     next_cell = path[1] if len(path) > 1 else start_cell
-
+    
     # 4) 방향 차이(diff) 계산
     target_yaw = calculate_angle(start_cell, next_cell)
     diff = (target_yaw - device_yaw + 360) % 360
     if diff > 180:
         diff -= 360
-
+    print("계산 각도: ", (abs(diff) / 180))
     # 이동/회전 명령 구성
     cmd = {
         'moveWS': {'command': 'W', 'weight': 0.5},  # 전진
@@ -384,6 +413,7 @@ def get_action():
         'turretRF': {'command': '', 'weight': 0.0},
         'fire': False                           # 사격 비활성
     }
+    
     return jsonify(cmd)
 
 @app.route('/set_destination', methods=['POST'])
