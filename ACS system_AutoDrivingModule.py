@@ -26,6 +26,12 @@ maze = [[0]*GRID_SIZE for _ in range(GRID_SIZE)]
 current_dest_index = 0             # 현재 목표 인덱스(2025_06_09)
 TARGET_THRESHOLD = 20.0           # 목표 도달로 간주할 거리 임계값
 
+# 전방 장애물 판단여부에 활용할 변수 선언(2025_06_10)
+ANGLE_THRESHOLD = 2.0  # diff가 이 값 이하일 때 회전 무시
+FOV_DEG = 8.0         # 전방 몇 도 내 장애물 판단
+DIST_THRESH = 10    # 장애물로 판단할 거리 (m)
+MAX_DIFF = 45      #장애물에 대해 회피해야 하는 경우, 회피기동의 민감도를 결정하는 변수 -> 값이 작을수록 신속하게 반응   
+
 # 순차 경로 탐색할 목적지 목록(2025_06_09)
 DESTINATIONS = [
     (10.0, 250.0),
