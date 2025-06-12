@@ -9,6 +9,7 @@ import torch
 from ultralytics import YOLO
 import json
 import re #라이더 데이터를 새로운 포멧으로 읽어오기 위한 모듈 import(2025_06_09)
+import threading
 
 app = Flask(__name__)
 # YOLO 객체 탐지 모델 로드 (Ultralytics YOLOv8)
@@ -27,16 +28,14 @@ current_dest_index = 0             # 현재 목표 인덱스(2025_06_09)
 TARGET_THRESHOLD = 20.0           # 목표 도달로 간주할 거리 임계값
 
 # 전방 장애물 판단여부에 활용할 변수 선언(2025_06_10)
-ANGLE_THRESHOLD = 2.0  # diff가 이 값 이하일 때 회전 무시
-FOV_DEG = 8.0         # 전방 몇 도 내 장애물 판단
-DIST_THRESH = 10    # 장애물로 판단할 거리 (m)
-MAX_DIFF = 45      #장애물에 대해 회피해야 하는 경우, 회피기동의 민감도를 결정하는 변수 -> 값이 작을수록 신속하게 반응   
+ANGLE_THRESHOLD = 0.1  # diff가 이 값 이하일 때 회전 무시
+FOV_DEG = 70       # 전방 몇 도 내 장애물 판단
+DIST_THRESH = 15   # 장애물로 판단할 거리 (m)
+MAX_DIFF = 30
 
 # 순차 경로 탐색할 목적지 목록(2025_06_09)
 DESTINATIONS = [
-    (10.0, 250.0),
-    (250.0, 250.0),
-    (250.0, 10.0)
+    (130, 180)
 ]
 
 device_yaw = 0.0    # 전차 현재 방향(도 단위)
@@ -44,72 +43,61 @@ previous_pos = None  # 마지막 위치 저장 (x, z)
 
 goal_reached = False # 전차의 목적지 도달여부를 판단하기 위한 전역변수
 
-# ----- LiDAR 데이터 불러오기 -----(2025_06_09)
-# LIDAR_DATA_DIR = "./lidar_data"
-# _LIDAR_PATTERN = re.compile(r"LidarData_t(\d+)_(\d+)\.json")
+is_avoiding = False  # 회피 중 여부(2025_06_11)
 
 #라이더 센서 데이터를 json파일에 대한 I/O 접근이 아닌 직접 읽어오기 위한 변수(2025_06_09)
 last_lidar_data = []
 
+# 전역 충돌 카운터와 락 2025_06_11
+collision_count = 0
+collision_lock = threading.Lock()
+
 # ----------------------------------------------------------------------------
 # 헬퍼 함수들
 # ----------------------------------------------------------------------------
-#2025_06_09 최신 라이더 데이터를 읽어들여오는 함수
-# def get_latest_lidar_data_filepath(directory: str) -> str:
-#     """
-#     주어진 디렉토리에서 'LidarData_t<N>_<M>.json' 패턴에 맞는 최신 파일 경로 반환
-#     """
-#     latest_file = None
-#     latest_t, latest_f = -1, -1
-#     try:
-#         if not os.path.isdir(directory):
-#             return None
-#         for fn in os.listdir(directory):
-#             m = _LIDAR_PATTERN.match(fn)
-#             if not m:
-#                 continue
-#             t_val, f_val = int(m.group(1)), int(m.group(2))
-#             if (t_val > latest_t) or (t_val == latest_t and f_val > latest_f):
-#                 latest_t, latest_f = t_val, f_val
-#                 latest_file = os.path.join(directory, fn)
-#     except Exception:
-#         return None
-#     return latest_file
-
-#전방에 장애물에 여부를 판단하는 함수 선언 2025_06_10
+#전방에 장애물에 여부를 판단하는 함수 선언 2025_06_10 => 각도 범위값 변경(2025_06_11)
 def obstacle_ahead(lidar_points, fov_deg=FOV_DEG, dist_thresh=DIST_THRESH):
-    """전방 ±fov_deg 범위 내에 dist_thresh 이하 장애물이 있으면 True 반환."""
     front_dists = []
     for p in lidar_points:
         angle_view = p.get('angle')
         if angle_view < 20 or angle_view > 340:
             if not p.get('isDetected') or p.get('verticalAngle') != 0:
                 continue
-            ang = math.degrees(math.atan2(p['position']['z'], p['position']['x']))
             front_dists.append(p['distance'])
     return (min(front_dists) if front_dists else float('inf')) < dist_thresh
-#전방에 장애물이 존재하면 회피각도를 결정하는 함수 선언 2025_06_10
-def compute_avoidance_direction(lidar_points, current_yaw):
-    """
-    장애물이 많은 쪽 반대 방향으로 회피 각도를 결정.
-    (간단히 좌/우 평균 거리를 비교해서 더 넓은 쪽으로 회피)
-    """
-    left_dists, right_dists = [], []
+
+#전방에 장애물이 존재하면 거리 가중치에 근거해서 회피각도를 결정하는 함수 선언 2025_06_11
+def compute_avoidance_direction_weighted(lidar_points, current_yaw, danger_dist=20.0, angle_delta=60):
+    left_risk, right_risk = 0.0, 0.0
+    left_count, right_count = 0, 0
+
     for p in lidar_points:
         if not p.get('isDetected') or p.get('verticalAngle') != 0:
             continue
-        ang = math.degrees(math.atan2(p['position']['z'], p['position']['x']))
-        dist = math.hypot(p['position']['x'], p['position']['z'])
-        if ang > 0:
-            left_dists.append(dist)
+
+        dist = p.get('distance', float('inf'))
+        if dist > danger_dist or dist <= 0.5:
+            continue
+
+        angle = p.get('angle', 0.0) % 360
+        risk = 1.0 / (dist + 1e-6)
+
+        # 0~180도 = 오른쪽 / 180~360도 = 왼쪽
+        if 0 <= angle <= 180:
+            right_risk += risk
+            right_count += 1
         else:
-            right_dists.append(dist)
-    # 장애물이 더 가까운 쪽을 피해 반대 방향으로 45° 회전
-    if (min(left_dists) if left_dists else float('inf')) < (min(right_dists) if right_dists else float('inf')):
-        return (current_yaw - 45) % 360
+            left_risk += risk
+            left_count += 1
+
+    print(f"[DEBUG] 좌 포인트 수: {left_count}, 우 포인트 수: {right_count}")
+    print(f"[DEBUG] 좌 위험도: {left_risk:.2f}, 우 위험도: {right_risk:.2f}")
+
+    if left_risk > right_risk:
+        return (current_yaw - angle_delta) % 360  # 오른쪽 회피
     else:
-        return (current_yaw + 45) % 360
-        
+        return (current_yaw + angle_delta) % 360  # 왼쪽 회피
+
 def world_to_grid(x: float, z: float) -> tuple:
     """
     세계 좌표 (x, z)를 그리드 인덱스 (i, j)로 변환.
@@ -118,7 +106,7 @@ def world_to_grid(x: float, z: float) -> tuple:
     i = max(0, min(GRID_SIZE-1, int(x)))
     j = max(0, min(GRID_SIZE-1, int(z)))
     return i, j
-   
+
 def heuristic(a: tuple, b: tuple) -> float:
     """
     A* 알고리즘 휴리스틱 함수.
@@ -233,9 +221,9 @@ def init():
     return jsonify({
         "startMode": "start",
         # 블록 좌표
-        "blStartX": 10, "blStartY": 10, "blStartZ": 10,
+        "blStartX": 150, "blStartY": 10, "blStartZ": 10,
         # 레드 좌표
-        "rdStartX": 250, "rdStartY": 10, "rdStartZ": 200,
+        "rdStartX": 150, "rdStartY": 10, "rdStartZ": 290,
         # 모드 설정
         "trackingMode": False,
         "detactMode": True,
@@ -275,7 +263,7 @@ def detect():
             'class': target_classes[cid],
             'bbox': [float(x1), float(y1), float(x2), float(y2)],
             'confidence': float(box[4]),
-            'color': "#FF0000",
+            'color': "#0400FF",
             'filled': True,
             'updateBoxWhileMoving': True
         })
@@ -296,14 +284,6 @@ def info():
     #전체 info에서 lidar data 값만 취사 선택해서 리스트로 저장(2025_06_09)
     points = data.get('lidarPoints', [])
     last_lidar_data = points 
-
-    #  verticalAngle == 0인 포인트의 distance만 출력
-    # for p in points:
-    #     if p.get('verticalAngle') == 0:
-    #         dist = p.get('distance')
-    #         print(f"[INFO] verticalAngle=0인 포인트 거리: {dist}")
-    #         # 필요하다면 전역 변수에도 저장하거나 다른 처리 가능
-
     return jsonify({"status": "ok"})
 
 @app.route('/update_obstacle', methods=['POST'])
@@ -348,11 +328,16 @@ def get_action():
     global previous_pos, device_yaw, goal_reached, current_dest_index #전역 설정한 변수 추가(current_dest_index 추가 2025_06_09)
     #실시간으로 라이더 데이터를 수신하기 위해서 last_lidar_data 선언(2025_06_09)
     global last_lidar_data
+
     data = request.get_json(force=True) or {}
     pos = data.get('position', {})
     x, z = float(pos.get('x', 0)), float(pos.get('z', 0))
+    # LiDAR 포인트 리스트 형태로 last_lidar_data 사용
+    lidar_points = last_lidar_data
 
-    # 1) 목표 도달 여부
+    # 장애물 감지 여부(2025_06_11)
+    obstacle_detected = obstacle_ahead(lidar_points)
+        
     # 서버 측에서 도달 이후 goal_reached = True 상태를 저장하고,
     # 이후에는 전혀 명령을 주지 않게(또는 상태 고정) 처리
     # 현재 목표 설정
@@ -368,7 +353,8 @@ def get_action():
             current_dest_index += 1
             print(f"[INFO] 다음 목적지 인덱스: {current_dest_index}")
         else:
-            print(f"[INFO] 목표 도달: 거리 {dist_to_goal:.2f}m → 최초 정지 명령 전송")
+            print(f"[INFO] 목표 도달: 거리 {dist_to_goal:.2f}m → 정지 명령 전송")
+            print(f"총 충돌 횟수는 {collision_count}번 입니다.")
             goal_reached = True
         return jsonify({
             'moveWS':{'command':'','weight':0.0}, 'moveAD':{'command':'','weight':0.0},
@@ -379,55 +365,13 @@ def get_action():
     goal_reached = False
 
     # 2) yaw 업데이트 (이전 위치가 있다면)
+    # 현재 움직임이 매우 작으면 yaw 업데이트 생략(2025_06_11)
     if previous_pos:
         dx, dz = x - previous_pos[0], z - previous_pos[1]
-        if math.hypot(dx, dz) > 0.01:
+        movement = math.hypot(dx, dz)
+        if movement > 0.2:  # ← 임계값 증가 (예: 0.01 → 0.2)
             device_yaw = (math.degrees(math.atan2(dz, dx)) + 360) % 360
     previous_pos = (x, z)
-
-    # LiDAR 데이터 반영: 장애물 업데이트(2025_06_09)
-    # lidar_fp = get_latest_lidar_data_filepath(LIDAR_DATA_DIR)
-    # if lidar_fp:
-    #     try:
-    #         with open(lidar_fp, 'r', encoding='utf-8') as lf:
-    #             jd = json.load(lf)
-    #             points = jd.get('data') if isinstance(jd, dict) else jd
-    #             for p in points or []:
-    #                 if p.get('verticalAngle') == 0 and p.get('isDetected'):
-    #                     ang = math.radians((device_yaw + p.get('angle', 0.0)) % 360)
-    #                     dist = p.get('distance', 0.0)
-
-    #                     #라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언(2025_06_09)
-    #                     lidar_pos = p.get('position', {})
-    #                     x_val = lidar_pos.get('x')
-    #                     z_val = lidar_pos.get('z')
-    #                     #print(f'장애물이 있는 X좌표는 {x_val}, Z좌표는 {z_val}입니다.')
-    #                     wx = x_val
-    #                     wz = z_val
-
-    #                     gi, gj = world_to_grid(wx, wz)
-    #                     maze[gi][gj] = 1
-
-    #                     #print(f"Detected obstacle at world coords (x={wx:.2f}, z={wz:.2f}) -> grid (i={gi}, j={gj})")
-    
-    #     except Exception as e:
-    #         print(f"Error reading LiDAR data: {e}")
-
-    # JSON이 아닌 실시간 LiDAR 데이터 반영: 장애물 업데이트(2025_06_09)
-    # for p in last_lidar_data:
-    #     if p.get('verticalAngle') == 0 and p.get('isDetected'):
-    #                     ang = math.radians((device_yaw + p.get('angle', 0.0)) % 360)
-    #                     dist = p.get('distance', 0.0)
-
-    #                     #라이더 데이터를 기반으로 실제 장애물의 좌표를 가져오기 위한 변수 선언(2025_06_09)
-    #                     lidar_pos = p.get('position', {})
-    #                     x_val = lidar_pos.get('x')
-    #                     z_val = lidar_pos.get('z')
-
-    #                     gi, gj = world_to_grid(x_val, z_val)
-    #                     maze[gi][gj] = 1
-
-    #                     print(f"Detected obstacle at world coords (x={x_val:.2f}, z={z_val:.2f}) -> grid (i={gi}, j={gj})")
 
     # A* 경로 탐색
     start_cell = world_to_grid(x, z)
@@ -442,47 +386,41 @@ def get_action():
     if diff > 180:
         diff -= 360
     print("계산 각도: ", (abs(diff) / 180))
+
+    print("is_avoiding :", is_avoiding)
     # 5) 장애물 vs 경로 회전 분기 구간 설정(2025_06_10)
-    # LiDAR 포인트 리스트 형태로 last_lidar_data 사용
-    lidar_points = last_lidar_data 
-    print(obstacle_ahead(lidar_points)) 
-    if obstacle_ahead(lidar_points):
+    #바뀐 변수로 교체 2025_06_11
+    
+    
+    if obstacle_detected:
         # 장애물 회피용 목표 각도
-        avoid_yaw = compute_avoidance_direction(lidar_points, device_yaw)
+        avoid_yaw = compute_avoidance_direction_weighted(lidar_points, device_yaw)
         diff = ((avoid_yaw - device_yaw + 360) % 360)
+        print(f"현재 DIFF 값은 {diff} 입니다.")
         if diff > 180:
             diff -= 360
-        print(f"장애물을 탐지했습니다. 회피가 필요한 구간입니다. 회피각도는 {min(abs(diff) / 180.0, 1.0)}도 입니다.")
+        print(f"장애물을 탐지했습니다. 회피가 필요한 구간입니다.")
         move_ad_cmd = {
             'command': 'A' if diff > 0 else 'D',
             'weight': min(abs(diff) / MAX_DIFF, 1.0)
         }
 
-        cmd = {
-        'moveWS': {'command': 'W', 'weight': 0.3},  # 전진
-        'moveAD': move_ad_cmd, #좌우 회전을 담당하는 변수로 교체(2025_06_10)
-        'turretQE': {'command': '', 'weight': 0.0},
-        'turretRF': {'command': '', 'weight': 0.0},
-        'fire': False                           # 사격 비활성
-    }
     else:
-    # 6) 회전 임계치 적용 구간 설정(2025_06_10)
         if abs(diff) < ANGLE_THRESHOLD:
             move_ad_cmd = {'command': '', 'weight': 0.0}
         else:
             move_ad_cmd = {
                 'command': 'A' if diff > 0 else 'D',
-                'weight': min(abs(diff) / 180.0, 1.0)
+                'weight': 0.2
             }
 
-        cmd = {
-            'moveWS': {'command': 'W', 'weight': 0.3},  # 전진
-            'moveAD': move_ad_cmd,
-            'turretQE': {'command': '', 'weight': 0.0},
-            'turretRF': {'command': '', 'weight': 0.0},
-            'fire': False                           # 사격 비활성
-        }
-    
+    cmd = {
+        'moveWS': {'command': 'W', 'weight': 0.3},
+        'moveAD': move_ad_cmd,
+        'turretQE': {'command': '', 'weight': 0.0},
+        'turretRF': {'command': '', 'weight': 0.0},
+        'fire': False
+    }
     return jsonify(cmd)
 
 @app.route('/set_destination', methods=['POST'])
@@ -502,11 +440,30 @@ def set_destination():
 def update_bullet():
     """발사체 정보 수신 (미사용)"""
     return jsonify({'status': 'ok'})
-
+#충돌 횟수를 카운팅하기 위한 collision count 세팅
 @app.route('/collision', methods=['POST'])
 def collision():
-    """충돌 정보 수신 (미사용)"""
-    return jsonify({'status': 'ok'})
+    """충돌 정보 수신 및 카운트 증가"""
+    global collision_count
+
+    # (Optional) POST로 넘어온 충돌 상세 정보가 필요하면 파싱
+    # data = request.get_json()
+
+    # 스레드 안전하게 카운트 증가
+    with collision_lock:
+        collision_count += 1
+        current_count = collision_count
+
+    return jsonify({
+        'status': 'ok',
+        'collision_count': current_count
+    })
+
+@app.route('/collision/count', methods=['GET'])
+def get_collision_count():
+    """현재까지 누적된 충돌 횟수 조회"""
+    with collision_lock:
+        return jsonify({'collision_count': collision_count})
 
 @app.route('/start', methods=['GET'])
 def start():
