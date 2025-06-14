@@ -272,55 +272,85 @@ def compute_avoidance_direction_weighted(lidar_points, current_yaw, danger_dist=
 
 def calculate_target_pitch(distance):
     """거리에 따라 필요한 포탄의 발사각(Pitch)을 계산합니다."""
-    min_gun_pitch, max_gun_pitch = -5.0, 9.75
+    min_gun_pitch, max_gun_pitch = -5.0, 9.75  # 실제 탱크의 최소, 최 발사각
+
+    # 다항식 모델을 사용하여 거리에 따른 초기 발사각을 계산
     initial_calculated_pitch = pitch_equation_model(distance)
+
+    # 계산된 발사각이 탱크의 실제 가동 범위를 벗어나지 않도록 값을 조정
     final_target_pitch = np.clip(initial_calculated_pitch, min_gun_pitch, max_gun_pitch)
     if abs(final_target_pitch - initial_calculated_pitch) > 0.01:
         print(f"DEBUG (calculate_target_pitch): Distance: {distance:.2f}, Initial Pitch: {initial_calculated_pitch:.2f}, Clamped: {final_target_pitch:.2f}")
-    return final_target_pitch
+    return final_target_pitch # 범위 이외의 값을 가질때 측정값을 넘긴다.
 
 def _process_yolo_detection(image_file):
     """이미지를 받아 YOLO 탐지를 수행하고 결과를 반환하며, 임시 파일을 정리합니다."""
     image_path = 'temp_image.jpg'
     try:
+        # 전송받은 이미지를 서버에 임시 파일로 저장
         image_file.save(image_path)
+        # 저장된 이미지 파일로 YOLO 모델을 실행하여 객체 탐지를 수행
         results = model(image_path)
+        # 탐지 결과를 numpy 배열로 변환
         yolo_detections = results[0].boxes.data.cpu().numpy()
         target_classes = {0: "tank", 1: "car"}
         filtered_results = []
         for box in yolo_detections:
             class_id = int(box[5])
+            # 탐지된 객체가 우리가 원하는 클래스(tank, car)에 속하는지 확인
             if class_id in target_classes:
+                # 결과 데이터를 리스트에 추가합니다.
                 filtered_results.append({
                     'className': target_classes[class_id], 'bbox': [float(c) for c in box[:4]],
                     'confidence': float(box[4]), 'color': '#00FF00', 'filled': False, 'updateBoxWhileMoving': True
                 })
         return filtered_results
     finally:
+        # try 블록이 성공하든 실패하든 항상 임시 파일을 삭제합니다.
         if os.path.exists(image_path):
             try: os.remove(image_path)
-            except Exception as e: print(f"Error: {image_path} 삭제 실패: {e}")
+            except Exception as e: print(f"Error: {image_path} 삭제 실패: {e}") # 파일 삭제에 실패하면 에러 메시지를 출력합니다.
 
 def _get_filtered_lidar_points():
     """전역 변수 last_lidar_data에서 직접 LiDAR 포인트를 가져와 필터링합니다."""
-    if not last_lidar_data: return []
+    if not last_lidar_data: return [] # last_lidar_data가 없으면 빈 리스트를 반환
     raw_points = last_lidar_data.get('lidarPoints', [])
+    # 포인트 데이터가 리스트 형태가 아니면 빈 리스트를 반환
     if not isinstance(raw_points, list): return []
+    # 'lidarPoints' 리스트에서 수직각(verticalAngle)이 0.0이고, 실제로 감지된(isDetected) 포인트만 추출
     return [p for p in raw_points if p.get('verticalAngle') == 0.0 and p.get('isDetected')]
 
 def _find_distance_for_detection(detection, lidar_points, state):
     """탐지된 객체 하나와 LiDAR 포인트 목록을 받아, 가장 일치하는 거리 값을 찾아 반환합니다."""
+    # 1. 탐지된 객체의 절대 각도 계산
     x1, _, x2, _ = detection['bbox']
-    u_center = (x1 + x2) / 2.0
-    phi_offset = (u_center / IMAGE_W - 0.5) * HFOV
-    phi_global_enemy = (state['turret_yaw'] + phi_offset + AIMING_YAW_OFFSET_DEG + 360) % 360
+    u_center = (x1 + x2) / 2.0 # 바운딩박스 중앙을 잡음
+    phi_offset = (u_center / IMAGE_W - 0.5) * HFOV # 정규화 한후에 각도값으로 변환
+    phi_global_enemy = (state['turret_yaw'] + phi_offset + AIMING_YAW_OFFSET_DEG + 360) % 360 # 적게 움직이는 방향으로 만듦
+    
+    # 이 계산된 phi 값을 detection 딕셔너리에 추가하여 나중에 사용할 수 있게 합니다.
     detection['phi'] = phi_global_enemy
+
+    # 2. 각도 차이가 가장 작은 LiDAR 포인트 찾기
+    # smallest_angular_diff : 가장 작은 각도 차이를 저장할 변수
     best_match, smallest_angular_diff = None, float('inf')
+
+    # 필터링된 모든 LiDAR 포인트에 대해 반복
     for point in lidar_points:
+         # LiDAR 포인트의 전역 각도를 계산
         lidar_global_angle = (state['turret_yaw'] + point.get('angle', 0.0) + 360) % 360
+
+        # 각 LiDAR 포인트의 전역 각도와 탐지된 적의 전역 각도 사이의 차이를 계산(-180 ~ 180도 범위)
         angular_diff = (lidar_global_angle - phi_global_enemy + 180 + 360) % 360 - 180
+
+        # 현재 포인트의 각도 차이가 이전에 찾은 최소 차이보다 작으면,
         if abs(angular_diff) < smallest_angular_diff:
+             # 이 포인트를 '가장 일치하는' 포인트로 간주하고 정보를 업데이트
             smallest_angular_diff, best_match = abs(angular_diff), point
+
+    # 3. 거리 값 반환
+    # 가장 일치하는 LiDAR 포인트를 찾았다면,
+    # 해당 포인트의 거리(distance) 값을 반환
     return best_match.get('distance') if best_match else None
 
 def _log_data(filepath, data):
@@ -351,27 +381,51 @@ def info():
 @app.route('/detect', methods=['POST'])
 def detect():
     """메인 탐지 로직: 이미지와 LiDAR 데이터를 융합하여 적의 거리를 계산합니다."""
+    # 전역 변수인 last_lidar_data와 last_enemy_data를 함수 내에서 수정할 수 있도록 선언
     global last_lidar_data, last_enemy_data
+    # --- 1. 이미지 및 현재 상태 가져오기 ---
     image_file = request.files.get('image')
-    if not image_file: return jsonify({"error": "No image received"}), 400
+    if not image_file: return jsonify({"error": "No image received"}), 400 # 이미지가 없으면 에러 메시지를 반환합니다.
+
+    # 현재 시간과 탱크의 포탑(turret), 차체(body)의 방향(yaw) 정보를 저장할 딕셔너리를 생성
     current_state = {'time': time.time(), 'turret_yaw': 0.0, 'body_yaw': 0.0}
+    # 만약 이전에 수신된 LiDAR 데이터(/info 엔드포인트를 통해)가 있다면, 그 정보로 현재 상태를 업데이트
     if last_lidar_data:
         current_state.update({
             'time': last_lidar_data.get('time', current_state['time']),
-            'turret_yaw': last_lidar_data.get('playerTurretX', 0.0),
-            'body_yaw': last_lidar_data.get('playerBodyX', 0.0)
+            'turret_yaw': last_lidar_data.get('playerTurretX', 0.0),  #playerTurretX는 /info에서 가져오는 변수
+            'body_yaw': last_lidar_data.get('playerBodyX', 0.0)       #playerBodyX는 /info에서 가져오는 변수
         })
+
+    # --- 2. 역할별 함수 호출로 작업 수행 ---
+    # (1) 이미지에서 객체 탐지 
     yolo_detections = _process_yolo_detection(image_file)
+    # 탐지된 객체 정보를 로그 파일에 기록
     _log_data('logs/detections.json', {'timestamp': current_state['time'], 'turretYaw': current_state['turret_yaw'], 'detections': yolo_detections})
+    
+    # (2) 최신 LiDAR 포인트 필터링
     lidar_points = _get_filtered_lidar_points()
+
+    # (3) 탐지된 탱크와 LiDAR 포인트를 융합하여 거리 계산
     enemy_distances = []
+
+    # 탐지된 각 객체에 대해 반복
     for det in yolo_detections:
-        if det['className'] == 'tank':
+        # 탐지된 객체가 'tank'일 경우에만 거리 계산을 수행
+        if det['className'] == 'tank': #class가 0인것 tank인것만 거리를 계산
+            # 헬퍼 함수를 호출하여 해당 탱크까지의 거리를 찾습니다.
             distance = _find_distance_for_detection(det, lidar_points, current_state)
+            # 거리가 성공적으로 계산되었을 경우, 적 정보 목록에 추가
             if distance is None: distance = 50.0
+            # _find_distance_for_detection에서 계산된 phi 추가
             enemy_distances.append({'phi': det['phi'], 'distance': distance, 'body_size': ENEMY_BODY_SIZE, 'turret_size': ENEMY_TURRET_SIZE})
+    
+    # --- 3. 최종 결과 기록 및 반환 ---
+    # 최종적으로 계산된 적 정보를 전역 변수에 저장하여 다른 함수(/get_action)에서 사용할 수 있게 합니다.
     last_enemy_data = {'timestamp': current_state['time'], 'enemies': enemy_distances}
+    # 적 정보를 로그 파일에 기록합니다.
     _log_data('logs/enemy.json', last_enemy_data)
+    # 탐지 결과를 JSON 형태로 클라이언트에게 반환
     return jsonify(yolo_detections)
 
 @app.route('/get_action', methods=['POST'])
