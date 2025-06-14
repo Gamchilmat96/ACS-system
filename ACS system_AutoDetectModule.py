@@ -3,249 +3,284 @@ from flask import Flask, request, jsonify
 import os
 import torch
 from ultralytics import YOLO
-import json
+import jsona
 import time
 import threading
-import math
-import glob # 파일 검색을 위해 추가
-import re   # 파일명 파싱을 위해 추가
-import numpy as np # 다항식 계산 및 clip 함수 사용을 위해 추가
+import numpy as np
 
 # ----- 웹 서버 설정 -----
 app = Flask(__name__)
 
 # ----- 모델 설정 -----
-model_path = "best.pt" # 사용자의 모델 경로
+# 모델 경로: 첫 번째 코드의 최신 모델 경로 사용
+model_path = "C:/Users/user/Desktop/best_0613_2.pt"
 try:
     model = YOLO(model_path)
 except Exception as e:
     print(f"Error loading YOLO model: {e}")
     exit()
 
-
 # ----- 탱크 크기 정보 -----
-PLAYER_BODY_SIZE    = (3.667, 1.582, 8.066)
+PLAYER_BODY_SIZE   = (3.667, 1.582, 8.066)
 PLAYER_TURRET_SIZE = (3.297, 2.779, 5.891)
-ENEMY_BODY_SIZE     = (3.303, 1.131, 6.339)
-ENEMY_TURRET_SIZE   = (2.681, 3.094, 2.822)
+ENEMY_BODY_SIZE    = (3.303, 1.131, 6.339)
+ENEMY_TURRET_SIZE  = (2.681, 3.094, 2.822)
 
 # ----- 전역 변수 및 동기화 설정 -----
-last_lidar_data = None # /info 엔드포인트를 통해 업데이트됨
+last_lidar_data = None
 last_enemy_data = None
 log_lock = threading.Lock()
 
 # ----- 설정값 -----
 IMAGE_W = 2560
-HFOV    = 46.05
-FIRE_THRESHOLD_DEG = 1.0 # 수평 발사 허용 오차 (도)
+HFOV = 46.05
+FIRE_THRESHOLD_DEG = 0.5
 
-# ----- LiDAR 데이터 경로 (WSL 환경 기준) -----
-LIDAR_DATA_DIR = "/mnt/c/Users/bok7z/OneDrive/문서/Tank Challenge/lidar_data" # 사용자가 제공한 경로
+# ----- 조준 관련 상수 -----
+# 조준 보정값: 두 번째 코드의 튜닝된 값 사용
+PITCH_FIRE_THRESHOLD_DEG = 0.1
+PITCH_ADJUST_RANGE_FOR_WEIGHT = 30.0
+AIMING_YAW_OFFSET_DEG = -0.5
+PITCH_AIM_OFFSET_DEG = 1.2
 
-# ----- 발사각(Pitch) 계산 모델 계수 -----
+# ----- 스캔 모드용 전역 변수 -----
+SCAN_STEP_DEG = 45.0
+PAUSE_SEC = 1.0
+scan_origin_yaw = None
+scan_index = 0
+pause_start = None
+scan_lap_count = 0
+scan_done = False  # 버그 수정을 위해 스캔 완료 상태 변수 추가 및 초기화
+
+# ----- 발사각(Pitch) 계산 모델 -----
 # pitch ≈ c0*distance³ + c1*distance² + c2*distance + c3
 PITCH_MODEL_COEFFS = [
-    1.18614662e-05,  # c0 (distance³의 계수)
-    -3.20931503e-03, # c1 (distance²의 계수)
-    3.87703588e-01,  # c2 (distance의 계수)
-    -11.55315302e+00  # c3 (상수항)
+    1.2e-05,
+    -3.25e-03,
+    3.914e-01,
+    -11.6408
 ]
 pitch_equation_model = np.poly1d(PITCH_MODEL_COEFFS)
 
-# ----- 새로운 조준 관련 상수 -----
-PITCH_FIRE_THRESHOLD_DEG = 0.5
-PITCH_ADJUST_RANGE_FOR_WEIGHT = 30.0
-
 def calculate_target_pitch(distance):
-    min_gun_pitch = -5.0  # 예시: 실제 탱크의 최소 발사각 (필요시 실제값으로 수정)
-    max_gun_pitch = 9.75  # 예시: 실제 탱크의 최대 발사각 (필요시 실제값으로 수정)
+    """거리에 따라 필요한 포탄의 발사각(Pitch)을 계산합니다."""
+    min_gun_pitch = -5.0
+    max_gun_pitch = 9.75
+    
     initial_calculated_pitch = pitch_equation_model(distance)
     final_target_pitch = np.clip(initial_calculated_pitch, min_gun_pitch, max_gun_pitch)
     
-    # 만약 clamping으로 인해 값이 변경되었다면 로그를 남겨 확인 (디버깅용)
-    if abs(final_target_pitch - initial_calculated_pitch) > 0.01: # 아주 작은 차이는 무시
-        print(f"DEBUG (calculate_target_pitch): Distance: {distance:.2f}, Initial Calc Pitch: {initial_calculated_pitch:.2f}, Clamped Target Pitch: {final_target_pitch:.2f} (Limits: {min_gun_pitch:.2f} to {max_gun_pitch:.2f})")
+    if abs(final_target_pitch - initial_calculated_pitch) > 0.01:
+        print(f"DEBUG (calculate_target_pitch): Distance: {distance:.2f}, Initial: {initial_calculated_pitch:.2f}, Clamped: {final_target_pitch:.2f}")
         
     return final_target_pitch
 
-# ----- Helper function to get the latest LiDAR data file -----
-def get_latest_lidar_data_filepath(directory):
-    latest_file = None; latest_t_val = -1; latest_frame_val = -1
-    pattern = re.compile(r"LidarData_t(\d+)_(\d+)\.json")
+def _process_yolo_detection(image_file):
+    """이미지를 받아 YOLO 탐지를 수행하고 결과를 반환합니다."""
+    image_path = 'temp_image.jpg'
     try:
-        if not os.path.isdir(directory):
-            print(f"Warning: LiDAR 데이터 디렉토리를 찾을 수 없거나 디렉토리가 아닙니다: {directory}"); return None
-        filenames = os.listdir(directory)
-        if not filenames:
-            print(f"Warning: LiDAR 데이터 디렉토리에 파일이 없습니다: {directory}"); return None
-        for filename in filenames:
-            match = pattern.match(filename)
-            if match:
-                t_val, frame_val = int(match.group(1)), int(match.group(2))
-                if t_val > latest_t_val or (t_val == latest_t_val and frame_val > latest_frame_val):
-                    latest_t_val, latest_frame_val, latest_file = t_val, frame_val, os.path.join(directory, filename)
-        if not latest_file: print(f"Warning: {directory} 에서 패턴에 맞는 LiDAR 파일을 찾지 못했습니다.")
-    except Exception as e: print(f"LiDAR 디렉토리 접근 중 오류 발생 {directory}: {e}"); return None
-    return latest_file
+        image_file.save(image_path)
+        results = model(image_path)
+        yolo_detections = results[0].boxes.data.cpu().numpy()
+        
+        # 변수 이름 표준화: target_classes
+        target_classes = {0: "tank", 1: "car"}
+        filtered_results = []
+        
+        for box in yolo_detections:
+            class_id = int(box[5])
+            if class_id in target_classes:
+                filtered_results.append({
+                    'className': target_classes[class_id],
+                    'bbox': [float(c) for c in box[:4]],
+                    'confidence': float(box[4]),
+                    'color': '#00FF00', 'filled': False, 'updateBoxWhileMoving': True
+                })
+        return filtered_results
+    finally:
+        if os.path.exists(image_path):
+            try:
+                os.remove(image_path)
+            except Exception as e:
+                print(f"Error: 임시 이미지 파일 {image_path} 삭제 실패: {e}")
+
+def _get_filtered_lidar_points():
+    """전역 변수 last_lidar_data에서 LiDAR 포인트를 필터링합니다."""
+    if not last_lidar_data:
+        return []
+    raw_points = last_lidar_data.get('lidarPoints', [])
+    if not isinstance(raw_points, list):
+        return []
+    return [p for p in raw_points if p.get('verticalAngle') == 0.0 and p.get('isDetected')]
+
+def _find_distance_for_detection(detection, lidar_points, state):
+    """탐지된 객체에 대해 가장 일치하는 LiDAR 거리 값을 찾습니다."""
+    x1, _, x2, _ = detection['bbox']
+    u_center = (x1 + x2) / 2.0
+    phi_offset = (u_center / IMAGE_W - 0.5) * HFOV
+    
+    # 변수 이름 표준화: state['turret_yaw']
+    phi_global_enemy = (state['turret_yaw'] + phi_offset + 360) % 360
+    detection['phi'] = phi_global_enemy
+    
+    best_match = None
+    smallest_angular_diff = float('inf')
+
+    for point in lidar_points:
+        # 변수 이름 표준화: state['turret_yaw']
+        lidar_global_angle = (state['turret_yaw'] + point.get('angle', 0.0) + 360) % 360
+        angular_diff = (lidar_global_angle - phi_global_enemy + 180 + 360) % 360 - 180
+        
+        if abs(angular_diff) < smallest_angular_diff:
+            smallest_angular_diff = abs(angular_diff)
+            best_match = point
+            
+    # 버그 수정: for 루프가 끝난 후, 최종적으로 찾은 best_match의 거리를 반환
+    if best_match:
+        # 변수 이름 표준화: 'distance'
+        return best_match.get('distance')
+        
+    return None
+
+def _log_data(filepath, data):
+    """주어진 데이터를 JSON 형태로 로그 파일에 기록합니다."""
+    with log_lock, open(filepath, 'a', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False)
+        f.write('\n')
 
 @app.route('/detect', methods=['POST'])
 def detect():
+    """메인 탐지 로직: 이미지와 LiDAR 데이터를 융합합니다."""
     global last_lidar_data, last_enemy_data
+    
     image_file = request.files.get('image')
-    if not image_file: return jsonify({"error": "No image received"}), 400
-    image_path = 'temp_image.jpg'; image_file.save(image_path)
-    results = model(image_path); yolo_detections = results[0].boxes.data.cpu().numpy()
-    target_classes = {0: "tank", 1: "car"} # 사용자 정의
-    filtered_results = []
-    for box in yolo_detections:
-        class_id = int(box[5])
-        if class_id in target_classes:
-            filtered_results.append({
-                'className': target_classes[class_id], 'bbox': [float(c) for c in box[:4]], 
-                'confidence': float(box[4]), 'color': '#00FF00', 'filled': False, 'updateBoxWhileMoving': True 
-            })
-    current_ts = time.time()
-    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-    # 사용자 확인: X가 Yaw(좌우), Y가 Pitch(상하)
-    # /detect 에서는 last_lidar_data의 playerTurretX를 turret_yaw로 사용
-    turret_yaw_from_lidar = 0.0 
-    player_body_yaw = 0.0 
+    if not image_file:
+        return jsonify({"error": "No image received"}), 400
+
+    current_state = {'time': time.time(), 'turret_yaw': 0.0, 'body_yaw': 0.0}
     if last_lidar_data:
-        current_ts = last_lidar_data.get('time', current_ts)
-        turret_yaw_from_lidar = last_lidar_data.get('playerTurretX', 0.0) # X가 Yaw이므로 playerTurretX 사용
-        player_body_yaw = last_lidar_data.get('playerBodyY', 0.0) # 차체 Yaw는 playerBodyY로 가정 (일반적)
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    detection_record = {'timestamp': current_ts, 'turretYaw': turret_yaw_from_lidar, 'detections': filtered_results}
-    os.makedirs('logs', exist_ok=True)
-    with log_lock, open('logs/detections.json', 'a', encoding='utf-8') as f:
-        json.dump(detection_record, f, ensure_ascii=False); f.write('\n')
+        current_state['time'] = last_lidar_data.get('time', current_state['time'])
+        # 변수 이름 표준화: turret_yaw
+        current_state['turret_yaw'] = last_lidar_data.get('playerTurretX', 0.0)
+        current_state['body_yaw'] = last_lidar_data.get('playerBodyX', 0.0)
+
+    yolo_detections = _process_yolo_detection(image_file)
+    _log_data('logs/detections.json', {'timestamp': current_state['time'], 'turretYaw': current_state['turret_yaw'], 'detections': yolo_detections})
+
+    lidar_points = _get_filtered_lidar_points()
+
+    # 변수 이름 표준화: enemy_distances, distance
     enemy_distances = []
-    latest_lidar_filepath = get_latest_lidar_data_filepath(LIDAR_DATA_DIR)
-    device_lidar_points_from_file = []
-    if latest_lidar_filepath:
-        try:
-            with open(latest_lidar_filepath, 'r', encoding='utf-8') as f_lidar:
-                loaded_json_data = json.load(f_lidar)
-                if isinstance(loaded_json_data, dict) and 'data' in loaded_json_data and isinstance(loaded_json_data['data'], list):
-                    device_lidar_points_from_file = loaded_json_data['data']
-                elif isinstance(loaded_json_data, list): device_lidar_points_from_file = loaded_json_data
-                else: print(f"Warning [/detect]: {latest_lidar_filepath} JSON 'data' 키 없음 또는 예상 구조 아님.")
-        except Exception as e: print(f"Error [/detect]: LiDAR 파일 처리 오류: {e}")
-    filtered_device_lidar_points = []
-    if device_lidar_points_from_file: 
-        for p in device_lidar_points_from_file:
-            if p.get('verticalAngle') == 0.0 and p.get('isDetected') is True:
-                filtered_device_lidar_points.append(p)
-        if not filtered_device_lidar_points and device_lidar_points_from_file: print("Warning [/detect]: LiDAR 포인트 필터링 결과 없음.")
-    elif latest_lidar_filepath: pass 
-    else: print(f"Warning [/detect]: {LIDAR_DATA_DIR} 에서 최신 LiDAR 파일 못찾음.")
-    if filtered_device_lidar_points and last_lidar_data:
-        for det in filtered_results:
-            if det['className'] == 'tank':
-                x1, _, x2, _ = det['bbox']
-                u_center = (x1 + x2) / 2.0; u_norm = u_center / IMAGE_W
-                phi_offset = (u_norm - 0.5) * HFOV 
-                phi_global_enemy = (turret_yaw_from_lidar + phi_offset + 360) % 360 
-                best_matching_point = None; smallest_angular_difference = float('inf')
-                for lidar_point in filtered_device_lidar_points:
-                    angle_relative_to_body = lidar_point.get('angle', 0.0)
-                    lidar_point_global_angle = (player_body_yaw + angle_relative_to_body + 360) % 360
-                    angular_diff = (lidar_point_global_angle - phi_global_enemy + 180 + 360) % 360 - 180
-                    if abs(angular_diff) < smallest_angular_difference:
-                        smallest_angular_difference = abs(angular_diff); best_matching_point = lidar_point
-                if best_matching_point:
-                    dist = best_matching_point.get('distance')
-                    if dist is not None:
-                        enemy_distances.append({'phi': phi_global_enemy, 'distance': float(dist),
-                                                'body_size': ENEMY_BODY_SIZE, 'turret_size': ENEMY_TURRET_SIZE })
-                    else: print(f"Warning [/detect]: Matched LiDAR point (phi {phi_global_enemy:.2f}) has no distance.")
-    elif not last_lidar_data : print("Warning [/detect]: last_lidar_data is None, LiDAR processing skipped.")
-    last_enemy_data = {'timestamp': current_ts, 'enemies': enemy_distances}
-    with log_lock, open('logs/enemy.json', 'a', encoding='utf-8') as f:
-        json.dump(last_enemy_data, f, ensure_ascii=False); f.write('\n')
-    if os.path.exists(image_path):
-        try: os.remove(image_path)
-        except Exception as e: print(f"Error: 임시 이미지 파일 {image_path} 삭제 실패: {e}")
-    return jsonify(filtered_results)
+    for det in yolo_detections:
+        if det['className'] == 'tank':
+            distance = _find_distance_for_detection(det, lidar_points, current_state)
+            if distance is None:
+                distance = 50.0  # 기본 거리값
+            enemy_distances.append({
+                'phi': det['phi'],
+                'distance': distance,
+                'body_size': ENEMY_BODY_SIZE,
+                'turret_size': ENEMY_TURRET_SIZE
+            })
+
+    last_enemy_data = {'timestamp': current_state['time'], 'enemies': enemy_distances}
+    _log_data('logs/enemy.json', last_enemy_data)
+
+    return jsonify(yolo_detections)
 
 @app.route('/info', methods=['POST'])
 def info():
+    """시뮬레이터로부터 탱크 상태 정보를 주기적으로 수신합니다."""
     global last_lidar_data
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
     last_lidar_data = data
-    # print(f"DEBUG [/info]: Received data. playerTurretX(Yaw): {last_lidar_data.get('playerTurretX')}, playerTurretY(Pitch): {last_lidar_data.get('playerTurretY')}")
     return jsonify({'status': 'success', 'control': ''})
 
 @app.route('/get_action', methods=['POST'])
 def get_action():
-    global last_lidar_data, last_enemy_data 
-    
-    turret_yaw_current = 0.0    # 좌우 각도
-    current_turret_pitch = 0.0  # 상하 각도
-    turret_angles_source = "defaults" 
+    """탐지된 정보를 바탕으로 탱크의 행동을 결정합니다."""
+    global last_lidar_data, last_enemy_data
+    global scan_origin_yaw, scan_index, pause_start, scan_lap_count, scan_done
 
-    if last_lidar_data:
-        # --- 현재 포탑 상태 (last_lidar_data로부터 가져오기) ---
-        # 사용자 확인: X가 Yaw(좌우), Y가 Pitch(상하)
-        # CSV 헤더가 Player_Turret_X, Player_Turret_Y 이므로, JSON 키는 playerTurretX, playerTurretY 일 가능성이 높음.
-        turret_yaw_current = last_lidar_data.get('playerTurretX', 0.0)   # <<--- X가 Yaw (좌우)
-        current_turret_pitch = last_lidar_data.get('playerTurretY', 0.0) # <<--- Y가 Pitch (상하)
-        turret_angles_source = "last_lidar_data (X:Yaw, Y:Pitch)"
-        print(f"DEBUG [/get_action]: Using turret angles from last_lidar_data: Yaw(X)={turret_yaw_current:.2f}, Pitch(Y)={current_turret_pitch:.2f}")
-    else:
-        _data_from_post_for_fallback = request.get_json(force=True) 
-        _turret_info_from_post = _data_from_post_for_fallback.get('turret', {})
-        # 사용자 확인: POST 데이터 내 turret 객체에서 x가 Yaw, y가 Pitch
-        turret_yaw_current = _turret_info_from_post.get('x', 0.0) # POST 데이터의 'x' (Yaw) 사용 (Fallback)
-        current_turret_pitch = _turret_info_from_post.get('y', 0.0) # POST 데이터의 'y' (Pitch) 사용 (Fallback)
-        turret_angles_source = "post_data_fallback (turret.x:Yaw, turret.y:Pitch)"
-        print(f"Warning [/get_action]: last_lidar_data is None. Falling back to turret angles from POST data: Yaw(x)={turret_yaw_current:.2f}, Pitch(y)={current_turret_pitch:.2f}")
+    # 변수 이름 표준화: turret_yaw, turret_pitch
+    turret_yaw = last_lidar_data.get('playerTurretX', 0.0)
+    turret_pitch = last_lidar_data.get('playerTurretY', 0.0)
 
-    cmd = {
-        'moveWS': {'command': 'STOP', 'weight': 1.0}, 'moveAD': {'command': '', 'weight': 0.0},
-        'turretQE': {'command': '', 'weight': 0.0}, 'turretRF': {'command': '', 'weight': 0.0},
-        'fire': False
-    }
+    cmd = {'moveWS':{'command':'STOP','weight':1.0}, 'moveAD':{'command':'','weight':0.0},
+            'turretQE':{'command':'','weight':0.0}, 'turretRF':{'command':'','weight':0.0}, 'fire':False}
 
+    # 스캔이 완료되었으면 아무것도 하지 않음
+    if scan_done:
+        return jsonify(cmd)
+
+    # 적이 있으면 조준/발사
     if last_enemy_data and last_enemy_data.get('enemies'):
-        target_enemy = min(last_enemy_data['enemies'], key=lambda e: e.get('distance', float('inf')))
-        phi_target_enemy = target_enemy['phi']
-        dist_to_target = target_enemy['distance']
-        calculated_target_pitch = calculate_target_pitch(dist_to_target)
-        
-        print(f"--- 조준 정보 (현재 각도 소스: {turret_angles_source}) ---")
-        print(f"  적 전차 거리 (dist_to_target): {dist_to_target:.2f}")
-        print(f"  계산된 목표 발사각 (calculated_target_pitch): {calculated_target_pitch:.2f} 도")
-        print(f"  현재 포탑 좌우각 (turret_yaw_current): {turret_yaw_current:.2f} 도")
-        print(f"  현재 포탑 상하각 (current_turret_pitch): {current_turret_pitch:.2f} 도")
+        # 변수 이름 표준화: target, dist, pitch_tgt
+        target = min(last_enemy_data['enemies'], key=lambda e: e['distance'])
+        phi_tgt = target['phi']
+        dist = target['distance']
+        pitch_tgt = calculate_target_pitch(dist) + PITCH_AIM_OFFSET_DEG
 
-        delta_yaw = ((phi_target_enemy - turret_yaw_current + 180) % 360) - 180
-        yaw_aim_weight = min(abs(delta_yaw) / 180.0, 1.0)
-        is_aimed_horizontally = abs(delta_yaw) <= FIRE_THRESHOLD_DEG
+        delta_yaw = ((phi_tgt - turret_yaw + 180) % 360) - 180
+        yaw_weight = min(abs(delta_yaw) / 180.0, 1.0) * 5
+        delta_pitch = pitch_tgt - turret_pitch
+        pitch_weight = min(abs(delta_pitch) / PITCH_ADJUST_RANGE_FOR_WEIGHT, 1.0) * 5
 
-        delta_pitch = calculated_target_pitch - current_turret_pitch
-        pitch_aim_weight = min(abs(delta_pitch) / PITCH_ADJUST_RANGE_FOR_WEIGHT, 1.0)
-        is_aimed_vertically = abs(delta_pitch) <= PITCH_FIRE_THRESHOLD_DEG
-        
-        print(f"  수평각 차이 (delta_yaw): {delta_yaw:.2f} 도 (목표수평각: {phi_target_enemy:.2f})")
-        print(f"  수직각 차이 (delta_pitch): {delta_pitch:.2f} 도")
-        print(f"  수평 조준 완료: {is_aimed_horizontally}, 수직 조준 완료: {is_aimed_vertically}")
-
-        if is_aimed_horizontally and is_aimed_vertically:
-            cmd['fire'] = True; print(f"  명령: 발사 (FIRE!)")
+        if abs(delta_yaw) <= FIRE_THRESHOLD_DEG and abs(delta_pitch) <= PITCH_FIRE_THRESHOLD_DEG:
+            cmd['fire'] = True
         else:
-            cmd['fire'] = False; current_commands_log = []
-            if not is_aimed_horizontally:
-                if delta_yaw > FIRE_THRESHOLD_DEG: cmd['turretQE'] = {'command': 'E', 'weight': yaw_aim_weight}; current_commands_log.append("Yaw: E")
-                elif delta_yaw < -FIRE_THRESHOLD_DEG: cmd['turretQE'] = {'command': 'Q', 'weight': yaw_aim_weight}; current_commands_log.append("Yaw: Q")
-            if not is_aimed_vertically:
-                if delta_pitch > PITCH_FIRE_THRESHOLD_DEG: cmd['turretRF'] = {'command': 'R', 'weight': pitch_aim_weight}; current_commands_log.append("Pitch: R")
-                elif delta_pitch < -PITCH_FIRE_THRESHOLD_DEG: cmd['turretRF'] = {'command': 'F', 'weight': pitch_aim_weight}; current_commands_log.append("Pitch: F")
-            if current_commands_log: print(f"  명령: 조준 중 - {', '.join(current_commands_log)}")
-            elif not (is_aimed_horizontally and is_aimed_vertically): print(f"  명령: 조준 중 (경계값 근처 또는 조준 명령 없음)")
+            if abs(delta_yaw) > FIRE_THRESHOLD_DEG:
+                cmd['turretQE'] = {'command': 'E' if delta_yaw > 0 else 'Q', 'weight': yaw_weight}
+            if abs(delta_pitch) > PITCH_FIRE_THRESHOLD_DEG:
+                cmd['turretRF'] = {'command': 'R' if delta_pitch > 0 else 'F', 'weight': pitch_weight}
+    
+    # 적이 없으면 스캔 모드 (빠져있던 로직 추가)
+    else:
+        # 최초 스캔 진입 시, 현재 각도를 시작점으로 설정
+        if scan_origin_yaw is None:
+            scan_origin_yaw = -45.0 # 시작각도 -90도로 처음시작 : 정면타격후 왼쪽으로 돌아가는거부터 시작
+            scan_index = 0
+            pause_start = None
+            scan_lap_count = 0
+
+        # 목표 각도 계산
+        
+        target_yaw = (scan_origin_yaw + SCAN_STEP_DEG * scan_index) % 360
+        delta = ((target_yaw - turret_yaw + 180) % 360) - 180
+
+        # 목표 전까지 회전
+        if abs(delta)>1.0:
+            pause_start = None
+            speed_weight = min(abs(delta)/30.0,0.5)
+            cmd['turretQE'] = {'command':'E' if delta>0 else 'Q','weight':speed_weight}
+        else:
+            # 목표 도달 후 대기
+            if pause_start is None:
+                pause_start = time.time()
+            if time.time() - pause_start < PAUSE_SEC:
+                cmd['turretQE'] = {'command':'','weight':0.0}
+            else:
+                scan_index += 1
+                if scan_index >= int(360/SCAN_STEP_DEG):
+                    scan_index     = 0
+                    scan_lap_count += 1
+                    
+
+                # 2바퀴 돌았으면 정면 복귀 로직 -> # 1바퀴 돌고 종료
+                if scan_lap_count >= 1:
+                    delta_to_origin = ((scan_origin_yaw - turret_yaw + 180) % 405) - 180
+                    if abs(delta_to_origin)>1.0:
+                        speed_weight = min(abs(delta_to_origin)/30.0,0.5)
+                        cmd['turretQE'] = {'command':'E' if delta_to_origin>0 else 'Q','weight':speed_weight}
+                    else:
+                        scan_done = True
+                        cmd['turretQE'] = {'command':'','weight':0.0}
+                    return jsonify(cmd)
+                pause_start = None
+
     return jsonify(cmd)
 
-# 나머지 라우트 함수들은 이전과 동일하게 유지됩니다.
+
 @app.route('/update_bullet', methods=['POST'])
 def update_bullet():
     return jsonify({'status': 'OK', 'message': 'Bullet impact data received'})
@@ -265,15 +300,15 @@ def collision():
 @app.route('/init', methods=['GET'])
 def init():
     config = {
-        'startMode': 'start',
+        'startMode': 'start', 
         'blStartX': 60, 'blStartY': 10, 'blStartZ': 27.23,
-        'rdStartX': 59, 'rdStartY': 10, 'rdStartZ': 280,
-        'trackingMode': False, 'detactMode': True, 'logMode': True,
-        'enemyTracking': False, 'saveSnapshot': False, 'saveLog': True,
+        'rdStartX': 59, 'rdStartY': 10, 'rdStartZ': 280, 
+        'trackingMode': False,'detactMode': True, 'logMode': True, 
+        'enemyTracking': False, 'saveSnapshot': False,'saveLog': True,
         'saveLidarData': True, 'lux': 30000,
-        'player_body_size': PLAYER_BODY_SIZE,
+        'player_body_size': PLAYER_BODY_SIZE, 
         'player_turret_size': PLAYER_TURRET_SIZE,
-        'enemy_body_size': ENEMY_BODY_SIZE,
+        'enemy_body_size': ENEMY_BODY_SIZE, 
         'enemy_turret_size': ENEMY_TURRET_SIZE
     }
     return jsonify(config)
@@ -283,4 +318,4 @@ def start():
     return jsonify({'control': ''})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5004, debug=True)
+    app.run(host='0.0.0.0', port=5000)
