@@ -442,203 +442,165 @@ def get_action():
     x, z = float(pos.get('x', 0)), float(pos.get('z', 0))
     lidar_points = last_lidar_data.get('lidarPoints', []) if isinstance(last_lidar_data, dict) else []
 
-    # --- 1) 자율주행 단계 ---
-    # goal_reached가 False이면 (즉, 아직 목적지에 도착 못했으면) 자율주행 로직 실행
-    if not goal_reached:
-        dest_x, dest_z = DESTINATIONS[current_dest_index]
-        dist_to_goal = math.hypot(x - dest_x, z - dest_z)
-
-        # 목표 지점 근처에 도착했는지 확인
-        if dist_to_goal < TARGET_THRESHOLD:
-            print(f"[INFO] 목적지 {current_dest_index} 도달: ({dest_x},{dest_z})")
-            # 다음 목적지가 있다면 목표 갱신
-            if current_dest_index < len(DESTINATIONS) - 1:
-                current_dest_index += 1
-                print(f"[INFO] 다음 목적지 인덱스: {current_dest_index}")
-            # 모든 목적지에 도달했다면 자율주행 종료
-            else:
-                print(f"[INFO] 최종 목표 도달: 거리 {dist_to_goal:.2f}m → 정지")
-                goal_reached = True # 자율주행 완료 스위치를 켬
-            # 자율주행이 끝나거나 다음 목적지로 갱신될 때 일단 정지 명령 전송
-            return jsonify({'moveWS':{}, 'moveAD':{}, 'turretQE':{}, 'turretRF':{}, 'fire':False})
-        # 아직 목적지로 이동 중일 때
-        else:
-            if previous_pos:
-                dx, dz = x - previous_pos[0], z - previous_pos[1]
-                # 탱크가 일정 거리 이상 움직였을 때만 현재 이동 방향(yaw)을 갱신
-                if math.hypot(dx, dz) > 0.2:
-                    device_yaw = (math.degrees(math.atan2(dz, dx)) + 360) % 360
-            previous_pos = (x, z)
-            
-            # A* 알고리즘으로 길찾기 실행
-            start_cell, goal_cell = world_to_grid(x, z), world_to_grid(dest_x, dest_z)
-            path = a_star(start_cell, goal_cell)
-            next_cell = path[1] if len(path) > 1 else start_cell
-            target_yaw = calculate_angle(start_cell, next_cell)
-            
-            # 가야 할 방향과 현재 내 탱크 방향의 차이 계산
-            diff = (target_yaw - device_yaw + 180) % 360 - 180
-
-            move_ad = {}
-            # 전방에 장애물이 있으면 회피 기동
-            if obstacle_ahead(lidar_points):
-                avoid_yaw = compute_avoidance_direction_weighted(lidar_points, device_yaw)
-                diff = (avoid_yaw - device_yaw + 180) % 360 - 180
-                move_ad = {'command':'D' if diff < 0 else 'A','weight':min(abs(diff)/MAX_DIFF,1.0)}
-            # 장애물이 없으면 목표 방향으로 선회
-            elif abs(diff) > ANGLE_THRESHOLD:
-                move_ad = {'command':'D' if diff < 0 else 'A','weight':0.2}
-
-            # 전진 및 선회 명령 동시 전송
-            return jsonify({'moveWS':{'command':'W','weight':0.3}, 'moveAD':move_ad, 'turretQE':{}, 'turretRF':{}, 'fire':False})
-
-    # --- 2) 조준 및 사격 단계 (자율주행이 끝났을 때, goal_reached = True) ---
-    turret_yaw_current, current_turret_pitch = 0.0, 0.0
     if last_lidar_data:
         turret_yaw_current = last_lidar_data.get('playerTurretX', 0.0)
         current_turret_pitch = last_lidar_data.get('playerTurretY', 0.0)
     else:
         fallback = data.get('turret', {})
-        turret_yaw_current, current_turret_pitch = fallback.get('x', 0.0), fallback.get('y', 0.0)
-        
-    cmd = {'moveWS':{},'moveAD':{},'turretQE':{},'turretRF':{},'fire': False}
-
-    # --- 교전 로직 시작: 시야에 적이 한 명이라도 있을 때 ---
+        turret_yaw_current = fallback.get('x', 0.0)
+        current_turret_pitch = fallback.get('y', 0.0)
+    #조준과 주행의 기능적 순서를 바꿈 (2025_06_16)
+    #기존 로직은 목표 지점에 도착하면 주행을 마무리하고 조준과 사격 진행.
+    #변경한 로직은 주행중에 detection이 발생하면 주행을 멈추고 조준, 사격 진행.
+    # --- A) 전투 우선: 적이 보이면 조준·사격 ------------------------------------------------
     if last_enemy_data and last_enemy_data.get('enemies'):
-        # ========== [추가된 코드] 목표 고정(Lock-on) 로직 ==========
-        # 이 부분은 AI가 한 번 정한 목표를 계속 조준하게 하여, 여러 적 사이에서 포탑이 흔들리는 것을 막아줍니다.
-        is_limited_searching = False # 적을 발견했으니, '주변 살피기' 모드는 끕니다.
-        target_to_engage = None # 이번 턴에 최종적으로 공격할 목표 (아직 미정)
+        cmd = {'moveWS': {}, 'moveAD': {}, 'turretQE': {}, 'turretRF': {}, 'fire': False}
 
-        # 1. AI의 첫 번째 질문: "내가 지금 조준하던 목표가 있었나?"
+        # 1) 락온 유지/해제
         if locked_target_info:
             locked_phi = locked_target_info['phi']
-            potential_match, min_angle_diff = None, float('inf')
-
-            # 1-1. 현재 보이는 적들 중에서, 내가 기억하던(락온한) 녀석과 가장 비슷한 녀석을 찾는다.
-            for enemy in last_enemy_data['enemies']:
-                angle_diff = abs(((enemy['phi'] - locked_phi + 180) % 360) - 180)
-                if angle_diff < min_angle_diff:
-                    min_angle_diff, potential_match = angle_diff, enemy
-            
-            # 1-2. 찾은 녀석이 기억 속의 녀석과 충분히 가깝고(5도 이내), 사라진 지 3초가 안 넘었다면(인내심) -> 락온 유지!
-            if min_angle_diff < 5.0 and (time.time() - last_sighting_time < TARGET_LOCK_TIMEOUT_SEC):
-                target_to_engage = potential_match # 이번 턴에 공격할 목표로 확정
-                last_sighting_time = time.time()  # 마지막으로 본 시간 최신화
-                print(f"[INFO] 목표 락온 유지: phi={target_to_engage['phi']:.2f}")
-            # 1-3. 기억 속의 녀석을 못 찾았거나, 너무 오래 안 보였으면 -> 포기하고 락온 해제
+            match, min_diff = None, float('inf')
+            for e in last_enemy_data['enemies']:
+                diff_phi = abs(((e['phi'] - locked_phi + 180) % 360) - 180)
+                if diff_phi < min_diff:
+                    min_diff, match = diff_phi, e
+            if match and min_diff < 5.0 and (time.time() - last_sighting_time < TARGET_LOCK_TIMEOUT_SEC):
+                target = match
+                last_sighting_time = time.time()
             else:
-                print(f"[INFO] 목표 락온 해제. (시야 이탈 또는 타임아웃)")
-                last_engagement_phi = locked_target_info['phi'] # 나중에 주변을 살필 수 있도록, 마지막 위치를 기억
-                locked_target_info, last_engagement_end_time = None, time.time()
-                is_limited_searching, limited_search_step = True, 0 # '주변 살피기' 모드 스위치를 켬
+                last_engagement_phi = locked_target_info['phi']
+                locked_target_info = None
+                is_limited_searching = True
+                limited_search_step = 0
+                last_engagement_end_time = time.time()
+                target = None
+        else:
+            target = None
 
-        # 2. AI의 두 번째 질문: "좋아, 지금 조준할 목표가 없네. 누구를 새로 조준해야 하지?"
-        if not target_to_engage:
-            # 2-1. 원본 로직 그대로: 현재 보이는 적들 중 가장 가까운 놈을 고른다.
-            new_target = min(last_enemy_data['enemies'], key=lambda e: e.get('distance', float('inf')))
-            target_to_engage = new_target # 이번 턴에 공격할 목표로 확정
-            # 2-2. 새로운 목표 정보를 '포스트잇'에 적는다 (락온).
-            locked_target_info = {'phi': target_to_engage['phi'], 'distance': target_to_engage['distance']}
-            last_sighting_time, aim_settle_start_time = time.time(), 0 # 마지막으로 본 시간과 조준 안정화 타이머 초기화
-            print(f"[INFO] 새로운 목표 락온: phi={locked_target_info['phi']:.2f}, dist={locked_target_info['distance']:.2f}")
+        # 2) 신규 락온
+        if not target:
+            target = min(last_enemy_data['enemies'], key=lambda e: e['distance'])
+            locked_target_info = {'phi': target['phi'], 'distance': target['distance']}
+            last_sighting_time = time.time()
+            aim_settle_start_time = 0
 
-        # --- 조준 및 발사 로직: 최종 결정된 `target_to_engage`를 사용 ---
-        if target_to_engage:
-            scan_origin_yaw, pause_start, scan_lap_count = None, None, 0 # 교전 중에는 일반 스캔 변수들 초기화
-            phi_target_enemy, dist_to_target = target_to_engage['phi'], target_to_engage['distance']
-            calculated_target_pitch = calculate_target_pitch(dist_to_target) + PITCH_AIM_OFFSET_DEG
-            
-            delta_yaw = ((phi_target_enemy - turret_yaw_current + 180) % 360) - 180
-            delta_pitch = calculated_target_pitch - current_turret_pitch
-            
-            # ========== [추가된 코드] 조준 안정화(Aim Settling) 로직 ==========
-            # 이 부분은 AI가 계속 움직이는 적을 상대로 조준만 하다가 발사를 못하는 '조준 마비' 현상을 해결합니다.
-            # 1. '완벽한 조준'이 아닌 '충분히 가까운 조준(견착 자세)' 상태인지 확인
-            is_aim_close = (abs(delta_yaw) <= FIRE_THRESHOLD_DEG * 3) and (abs(delta_pitch) <= PITCH_FIRE_THRESHOLD_DEG * 5)
+        # 3) 조준 및 발사
+        phi_t, dist_t = target['phi'], target['distance']
+        desired_pitch = calculate_target_pitch(dist_t) + PITCH_AIM_OFFSET_DEG
+        delta_yaw = ((phi_t - turret_yaw_current + 180) % 360) - 180
+        delta_pitch = desired_pitch - current_turret_pitch
 
-            # 2. '견착 자세'에 처음 들어왔다면, 발사를 위한 카운트다운 시작
-            if is_aim_close:
-                if aim_settle_start_time == 0:
-                    aim_settle_start_time = time.time()
-                    print("[INFO] 조준 안정권 진입...")
-            # '견착 자세'가 흐트러지면 카운트다운 리셋
+        # 조준 안정화
+        close_enough = (abs(delta_yaw) <= FIRE_THRESHOLD_DEG * 3) and (abs(delta_pitch) <= PITCH_FIRE_THRESHOLD_DEG * 5)
+        if close_enough and aim_settle_start_time == 0:
+            aim_settle_start_time = time.time()
+        if not close_enough:
+            aim_settle_start_time = 0
+
+        fire_ready = (
+            (abs(delta_yaw) <= FIRE_THRESHOLD_DEG and abs(delta_pitch) <= PITCH_FIRE_THRESHOLD_DEG)
+            or
+            (aim_settle_start_time and (time.time() - aim_settle_start_time > AIM_SETTLE_DURATION_SEC))
+        )
+
+        if fire_ready:
+            cmd['fire'] = True
+            aim_settle_start_time = 0
+        else:
+            if abs(delta_yaw) > FIRE_THRESHOLD_DEG:
+                w = min(min(abs(delta_yaw)/180,1)*5,1)
+                cmd['turretQE'] = {'command': 'E' if delta_yaw>0 else 'Q', 'weight': w}
+            if abs(delta_pitch) > PITCH_FIRE_THRESHOLD_DEG:
+                w = min(min(abs(delta_pitch)/PITCH_ADJUST_RANGE_FOR_WEIGHT,1)*5,1)
+                cmd['turretRF'] = {'command': 'R' if delta_pitch>0 else 'F', 'weight': w}
+
+        return jsonify(cmd)
+
+    # --- B) 자율주행: 목표 미도달 시 ------------------------------------------------------
+    elif not goal_reached:
+        dest_x, dest_z = DESTINATIONS[current_dest_index]
+        dist_to_goal = math.hypot(x - dest_x, z - dest_z)
+
+        # 목표에 가까워지면 인덱스 혹은 완료
+        if dist_to_goal < TARGET_THRESHOLD:
+            if current_dest_index < len(DESTINATIONS) - 1:
+                current_dest_index += 1
             else:
-                aim_settle_start_time = 0
+                goal_reached = True
+            return jsonify({'moveWS': {}, 'moveAD': {}, 'turretQE': {}, 'turretRF': {}, 'fire': False})
 
-            # 3. 최종 발사 결정! "완벽하게 조준했거나, OR 0.25초 이상 견착 자세를 유지했다면"
-            is_fire_ready = (abs(delta_yaw) <= FIRE_THRESHOLD_DEG and abs(delta_pitch) <= PITCH_FIRE_THRESHOLD_DEG) or \
-                            (aim_settle_start_time != 0 and time.time() - aim_settle_start_time > AIM_SETTLE_DURATION_SEC)
+        # 이동 방향 갱신
+        if previous_pos:
+            dx, dz = x - previous_pos[0], z - previous_pos[1]
+            if math.hypot(dx, dz) > 0.2:
+                device_yaw = (math.degrees(math.atan2(dz, dx)) + 360) % 360
+        previous_pos = (x, z)
 
-            if is_fire_ready:
-                cmd['fire'], aim_settle_start_time = True, 0 # 발사하고 카운트다운 리셋
-                print("***** 발사(FIRE) *****")
-            else:
-                # 발사 준비가 안됐으면, 계속 조준 (원본 코드의 조준 로직)
-                if abs(delta_yaw) > FIRE_THRESHOLD_DEG:
-                    yaw_aim_weight = min(min(abs(delta_yaw) / 180.0, 1.0) * 5, 1.0)
-                    cmd['turretQE'] = {'command': 'E' if delta_yaw > 0 else 'Q', 'weight': yaw_aim_weight}
-                if abs(delta_pitch) > PITCH_FIRE_THRESHOLD_DEG:
-                    pitch_aim_weight = min(min(abs(delta_pitch) / PITCH_ADJUST_RANGE_FOR_WEIGHT, 1.0) * 5, 1.0)
-                    cmd['turretRF'] = {'command': 'R' if delta_pitch > 0 else 'F', 'weight': pitch_aim_weight}
+        # A* 길찾기
+        start = world_to_grid(x, z)
+        goal  = world_to_grid(dest_x, dest_z)
+        path  = a_star(start, goal)
+        next_cell = path[1] if len(path) > 1 else start
+        target_yaw = calculate_angle(start, next_cell)
+        diff = ((target_yaw - device_yaw + 180) % 360) - 180
 
-    # --- 탐색 로직 시작: 시야에 적이 한 명도 없을 때 ---
-    else: 
-        # 이전에 락온했던 타겟이 있었다면, 그 적이 사라진 것이므로 '주변 살피기' 모드를 켠다.
-        if locked_target_info:
-             last_engagement_phi, is_limited_searching, limited_search_step = locked_target_info['phi'], True, 0
-        locked_target_info = None # 시야에 적이 없으니, '포스트잇'은 깨끗이 비운다.
+        # 장애물 회피
+        if obstacle_ahead(lidar_points):
+            avoid = compute_avoidance_direction_weighted(lidar_points, device_yaw)
+            diff = ((avoid - device_yaw + 180) % 360) - 180
+            move_ad = {'command': 'A' if diff>0 else 'D', 'weight': min(abs(diff)/MAX_DIFF,1.0)}
+        elif abs(diff) > ANGLE_THRESHOLD:
+            move_ad = {'command': 'A' if diff>0 else 'D', 'weight': 0.2}
+        else:
+            move_ad = {}
 
-        # ========== [추가된 코드] 제한적 탐색(Limited Search) 로직 ==========
-        # 이 부분은 AI가 적을 놓쳤을 때, 바로 90도씩 크게 도는 대신 마지막 위치 주변을 먼저 살피는 '스마트 스캔' 기능입니다.
+        return jsonify({
+            'moveWS': {'command':'W','weight':0.3},
+            'moveAD': move_ad,
+            'turretQE': {}, 'turretRF': {}, 'fire': False
+        })
+
+    # --- C) 목표 도달 후 스캔 모드 -------------------------------------------------------
+    else:
+        cmd = {'moveWS': {'command':'STOP','weight':1.0},
+               'moveAD': {}, 'turretQE': {}, 'turretRF': {}, 'fire': False}
+
+        # 제한적 탐색 모드
         if is_limited_searching:
-            # '빼꼼' 패턴: 중앙 -> 왼쪽 15도 -> 오른쪽 15도 -> 왼쪽 15도
-            search_pattern = [0, -15, 30, -30] 
-            # 정해진 패턴을 다 수행하지 않았다면
-            if limited_search_step < len(search_pattern):
-                # 이번에 살펴볼 각도 계산
-                target_angle = (last_engagement_phi + search_pattern[limited_search_step]) % 360
-                delta = ((target_angle - turret_yaw_current + 180) % 360) - 180
-                print(f"[INFO] 제한적 탐색 중... (단계: {limited_search_step}, 목표각: {target_angle:.1f})")
-                # 목표 각도로 회전
-                if abs(delta) > 2.0:
-                    speed_weight = min(abs(delta) / 45.0, 0.5)
-                    cmd['turretQE'] = {'command': 'E' if delta > 0 else 'Q', 'weight': speed_weight}
-                # 목표 각도에 도달하면, 다음 '빼꼼' 단계로 넘어감
+            pattern = [0, -15, 30, -30]
+            if limited_search_step < len(pattern):
+                target_ang = (last_engagement_phi + pattern[limited_search_step]) % 360
+                d = ((target_ang - turret_yaw_current + 180) % 360) - 180
+                if abs(d) > 2:
+                    w = min(abs(d)/45,0.5)
+                    cmd['turretQE'] = {'command':'E' if d>0 else 'Q','weight':w}
                 else:
                     limited_search_step += 1
-                return jsonify(cmd) # '주변 살피기'가 끝나기 전까지는 아래의 일반 스캔 로직을 실행하지 않음
-            # '빼꼼'을 다 했는데도 적이 없으면, '주변 살피기' 모드를 끄고 일반 스캔으로 넘어감
+                return jsonify(cmd)
             else:
-                is_limited_searching, scan_origin_yaw = False, None
-                print("[INFO] 제한적 탐색 종료. 일반 스캔 모드로 전환.")
-        
-        # 교전 직후라면, 다른 행동을 하기 전에 잠시 대기
-        if time.time() - last_engagement_end_time < POST_ENGAGEMENT_DELAY_SEC:
-            print(f"[INFO] 교전 후 대기 시간... ({POST_ENGAGEMENT_DELAY_SEC}초)")
-            return jsonify(cmd)
+                is_limited_searching = False
+                scan_origin_yaw = None
 
-        # ── 기존 '일반 스캔' 모드 로직 (90° 스텝) ──
+        # 일반 90° 스텝 스캔
         if scan_origin_yaw is None:
             scan_origin_yaw, scan_index, pause_start, scan_lap_count = turret_yaw_current, 0, None, 0
-        target_yaw = (scan_origin_yaw + SCAN_STEP_DEG * scan_index) % 360
-        delta = ((target_yaw - turret_yaw_current + 180) % 360) - 180
-        if abs(delta) > 1.0:
+        target_yaw = (scan_origin_yaw + SCAN_STEP_DEG*scan_index) % 360
+        d = ((target_yaw - turret_yaw_current + 180) % 360) - 180
+        if abs(d) > 1:
             pause_start = None
-            speed_weight = min(abs(delta) / 30.0, 0.5)
-            cmd['turretQE'] = {'command': 'E' if delta > 0 else 'Q', 'weight': speed_weight}
+            w = min(abs(d)/30,0.5)
+            cmd['turretQE'] = {'command':'E' if d>0 else 'Q','weight':w}
         else:
-            if pause_start is None: pause_start = time.time()
-            if time.time() - pause_start < PAUSE_SEC:
-                cmd['turretQE'] = {'command': '', 'weight': 0.0}
-            else:
+            if pause_start is None:
+                pause_start = time.time()
+            elif time.time() - pause_start >= PAUSE_SEC:
                 scan_index += 1
-                if scan_index >= int(360 / SCAN_STEP_DEG):
-                    scan_index, scan_lap_count = 0, scan_lap_count + 1
-                if scan_lap_count >= 2: cmd['turretQE'] = {'command': '', 'weight': 0.0}
-                else: pause_start = None
+                if scan_index >= int(360/SCAN_STEP_DEG):
+                    scan_index, scan_lap_count = 0, scan_lap_count+1
+                if scan_lap_count < 2:
+                    pause_start = None
 
-    return jsonify(cmd)
+        return jsonify(cmd)
 
 @app.route('/set_destination', methods=['POST'])
 def set_destination():
