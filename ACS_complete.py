@@ -516,6 +516,11 @@ def get_action():
         desired_pitch = calculate_target_pitch(dist_t) + PITCH_AIM_OFFSET_DEG
         delta_yaw = ((phi_t - turret_yaw_current + 180) % 360) - 180
         delta_pitch = desired_pitch - current_turret_pitch
+        
+        # log에 detecting된 전차와의 거리 및 각도 출력 (2025_06_19)
+        print(f"  적 전차 거리: {dist_t:.2f}")
+        print(f"  목표 pitch 각도: {desired_pitch:.2f}")
+        print(f"  현재 yaw: {turret_yaw_current:.2f}, 현재 pitch: {current_turret_pitch:.2f}")
 
         # 조준 안정화
         close_enough = (abs(delta_yaw) <= FIRE_THRESHOLD_DEG * 3) and (abs(delta_pitch) <= PITCH_FIRE_THRESHOLD_DEG * 5)
