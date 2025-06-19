@@ -270,6 +270,33 @@ def compute_avoidance_direction_weighted(lidar_points, current_yaw, danger_dist=
     else:
         return (current_yaw + angle_delta) % 360  # 왼쪽 회피
 
+def compute_forward_weight(lidar_points, min_w=0.1, max_w=0.3, slow_range=30.0, stop_range=15.0): # 2025_06_16(장애물에 근접시 속도변화)
+    # 가까움의 기준: 20m, 매우 가까움: 10m 이하일 땐 거의 정지
+    """
+    전방 장애물 거리 기반 'W' weight 계산.
+    - slow_range 이상: 최대 속도
+    - stop_range 이하: 거의 정지
+    - 중간: 선형 감속
+    """
+    front_dists = [
+        p['distance'] for p in lidar_points
+        if p.get('isDetected') and p.get('verticalAngle') == 0 and (p['angle'] < 30 or p['angle'] > 330)
+    ]
+
+    if not front_dists:
+        return max_w
+
+    min_dist = min(front_dists) 
+
+    if min_dist >= slow_range:
+        return max_w
+    elif min_dist <= stop_range:
+        return min_w
+    else:
+        # stop_range ~ slow_range 사이에서 선형 보간
+        ratio = (min_dist - stop_range) / (slow_range - stop_range)
+        return min_w + (max_w - min_w) * ratio
+        
 def calculate_target_pitch(distance):
     """거리에 따라 필요한 포탄의 발사각(Pitch)을 계산합니다."""
     min_gun_pitch, max_gun_pitch = -5.0, 9.75  # 실제 탱크의 최소, 최 발사각
@@ -553,7 +580,8 @@ def get_action():
             move_ad = {'command': 'A' if diff>0 else 'D', 'weight': 0.2}
         else:
             move_ad = {}
-
+            
+        forward_weight = compute_forward_weight(lidar_points) # 2025_06_16(장애물 근접시 속도를 늦춤)
         return jsonify({
             'moveWS': {'command':'W','weight':0.3},
             'moveAD': move_ad,
