@@ -512,8 +512,8 @@ def init():
         'logMode':True, 
         'enemyTracking':False,
         'saveSnapshot':False,
-        'saveLog':True,
-        'saveLidarData':True,
+        'saveLog':False, # 데이터가 너무 많아져서 디폴트를 False
+        'saveLidarData':False, # 데이터가 너무 많아져서 디폴트를 False
         'lux':30000, 
         'player_body_size':PLAYER_BODY_SIZE,'player_turret_size':PLAYER_TURRET_SIZE,
         'enemy_body_size':ENEMY_BODY_SIZE,'enemy_turret_size':ENEMY_TURRET_SIZE
