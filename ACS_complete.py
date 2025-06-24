@@ -107,7 +107,7 @@ POST_ENGAGEMENT_DELAY_SEC = 2.0
 aim_settle_start_time = 0
 # AIM_SETTLE_DURATION_SEC: 조준이 '대충 맞은' 상태로 이 시간(초) 이상 유지되면, 완벽하지 않아도 발사!
 #                          계속 움직이는 적을 상대로 조준만 하다가 아무것도 못 하는 상황을 방지.
-AIM_SETTLE_DURATION_SEC = 0.25
+AIM_SETTLE_DURATION_SEC = 0.8 #(0.25 -> 0.8)_0624수정
 
 # --- 제한적 탐색(Limited Search) 관련 변수: '스마트 스캔' 기능을 담당합니다. ---
 # last_engagement_phi: 마지막으로 적을 놓친 지점의 각도를 기억.
@@ -547,7 +547,8 @@ def detect():
             # 헬퍼 함수를 호출하여 해당 탱크까지의 거리를 찾습니다.
             distance = _find_distance_for_detection(det, lidar_points, current_state)
             # 거리가 성공적으로 계산되었을 경우, 적 정보 목록에 추가
-            if distance is None: distance = 50.0
+            if distance is None or distance <= 0:
+                distance = np.nan #nan이면 계속해서 주행(0624)
             # _find_distance_for_detection에서 계산된 phi 추가
             enemy_distances.append({'phi': det['phi'], 'distance': distance, 'body_size': ENEMY_BODY_SIZE, 'turret_size': ENEMY_TURRET_SIZE})
     
@@ -592,6 +593,17 @@ def get_action():
         fallback = data.get('turret', {})
         turret_yaw_current = fallback.get('x', 0.0)
         current_turret_pitch = fallback.get('y', 0.0)
+
+    # 행동 결정 전, 유효한(거리가 nan이 아닌) 적만 필터링합니다. #nan이면 계속해서 주행(0624)
+    valid_enemies = []
+    if last_enemy_data and last_enemy_data.get('enemies'):
+        valid_enemies = [
+            e for e in last_enemy_data['enemies']
+            if 'distance' in e and not np.isnan(e['distance'])
+        ]
+        if len(valid_enemies) < len(last_enemy_data['enemies']):
+            print(f"[INFO] Filtered out {len(last_enemy_data['enemies']) - len(valid_enemies)} enemies with NaN distance.")
+    
     #조준과 주행의 기능적 순서를 바꿈 (2025_06_16)
     #기존 로직은 목표 지점에 도착하면 주행을 마무리하고 조준과 사격 진행.
     #변경한 로직은 주행중에 detection이 발생하면 주행을 멈추고 조준, 사격 진행.
@@ -690,7 +702,7 @@ def get_action():
             # TURRQE 축(E/Q)로 회전 명령
             cmd['turretQE'] = {
                 'command': 'E' if diff > 0 else 'Q',
-                'weight': min(abs(diff) / 180.0, 1.0)
+                'weight': min(abs(diff) / 45.0, 1.5) # 터렛정렬 속도 증가 _0624
             }
         
         return jsonify(cmd)
