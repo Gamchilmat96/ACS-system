@@ -778,60 +778,29 @@ def get_action():
         cmd = {'moveWS': {'command':'STOP','weight':1.0},
                'moveAD': {}, 'turretQE': {}, 'turretRF': {}, 'fire': False}
 
-        # 제한적 탐색 모드
-        if is_limited_searching:
-            pattern = [0, -15, 30, -30]
-            if limited_search_step < len(pattern):
-                target_ang = (last_engagement_phi + pattern[limited_search_step]) % 360
-                d = ((target_ang - turret_yaw_current + 180) % 360) - 180
-                if abs(d) > 2:
-                    w = min(abs(d)/45,0.5)
-                    cmd['turretQE'] = {'command':'E' if d>0 else 'Q','weight':w}
-                else:
-                    limited_search_step += 1
-                return jsonify(cmd)
-            else:
-                is_limited_searching = False
-                scan_origin_yaw = None
+        #코드전체수정 (포탑 90도씩 회전 탐색 -> 주행이후 정지)_0624
 
-        # 일반 90° 스텝 스캔
-        if scan_origin_yaw is None:
-            scan_origin_yaw, scan_index, pause_start, scan_lap_count = -90, 0, None, 0
+        # last_lidar_data가 있을 경우 playerBodyX 값을, 없으면 이전 device_yaw 값을 사용
+        body_yaw = last_lidar_data.get('playerBodyX', device_yaw) if last_lidar_data else device_yaw
+        turret_yaw_current = last_lidar_data.get('playerTurretX', 0.0) if last_lidar_data else 0.0
 
-        target_yaw = (scan_origin_yaw + SCAN_STEP_DEG*scan_index) % 360
+        # 차체 정면으로 포탑을 정렬하기 위한 각도 차이 계산
+        # 결과를 [-180, 180] 범위로 정규화하여 최단 회전 방향을 찾음
+        delta_to_front = ((body_yaw - turret_yaw_current + 180) % 360) - 180
 
-        d = ((target_yaw - turret_yaw_current + 180) % 360) - 180
+        # 포탑 정렬이 완료되었다고 판단할 허용 오차 각도
+        ALIGNMENT_THRESHOLD = 1.0
 
-        # 목표 전까지 회전(2025_06_24)
-        if abs(d)>1.0:
-            pause_start = None
-            w = min(abs(d)/60.0,0.5) # 가로회전속도
-            cmd['turretQE'] = {'command':'E' if d>0 else 'Q','weight':w}
+        if abs(delta_to_front) > ALIGNMENT_THRESHOLD:
+            # 아직 정렬이 완료되지 않았으면 포탑 회전 명령 생성
+            # 회전 속도는 남은 각도에 비례하도록 설정 (최대 0.5)
+            weight = min(abs(delta_to_front) / 60.0, 0.5)
+            cmd['turretQE'] = {'command': 'E' if delta_to_front > 0 else 'Q', 'weight': weight}
         else:
-            # 목표 도달 후 대기(2025_06_24)
-            if pause_start is None:
-                pause_start = time.time()
-            if time.time() - pause_start < PAUSE_SEC:
-                cmd['turretQE'] = {'command':'','weight':0.0}
-            else:
-                scan_index += 1
-                if scan_index >= int(360/SCAN_STEP_DEG):
-                    scan_index     = 0
-                    scan_lap_count += 1
-                    
-
-                # 2바퀴 돌았으면 정면 복귀 로직 -> # 1바퀴 돌고 종료(2025_06_24)
-                if scan_lap_count >= 1:
-                    delta_to_origin = ((scan_origin_yaw - turret_yaw_current + 180) % 450) - 180 # 정면으로 복귀, 360+45로 각도를 줌 -> -45도에서 시작(2025_06_24)
-                    if abs(delta_to_origin)>1.0:
-                        w = min(abs(delta_to_origin)/60.0,0.5)
-                        cmd['turretQE'] = {'command':'E' if delta_to_origin>0 else 'Q','weight':w}
-                    else:
-                        scan_done = True
-                        cmd['turretQE'] = {'command':'','weight':0.0}
-                    return jsonify(cmd)
-                pause_start = None
-
+            # 정렬이 완료되었으면 모든 동작을 정지
+            cmd['turretQE'] = {'command': '', 'weight': 0.0}
+            cmd['moveWS'] = {'command': 'STOP', 'weight': 1.0}
+            
         return jsonify(cmd)
 
 @app.route('/set_destination', methods=['POST'])
