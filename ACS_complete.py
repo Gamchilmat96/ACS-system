@@ -2,7 +2,7 @@
 # =============================================================================
 # Flask 서버: 자율주행 → 정지 후 자율조준 통합 구현
 # =============================================================================
-from flask import Flask, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 import os
 import json
 import re
@@ -10,10 +10,11 @@ import threading
 import time
 import math
 import glob
+import cv2
 import numpy as np
 from queue import PriorityQueue
 from ultralytics import YOLO
-
+from collections import deque
 app = Flask(__name__)
 
 # ----- 모델 설정 -----
@@ -753,7 +754,7 @@ def get_action():
                     'command': 'A' if diff > 0 else 'D',
                     'weight': 0.2 # 가중치 0.2->0.4변경(2025_06_24)
                 }
-        })
+                
         forward_weight = compute_forward_weight(lidar_points) # 2025_06_16(장애물 근접시 속도를 늦춤)
         return jsonify({
             'moveWS': {'command':'W','weight':forward_weight},  # 0.3 -> forward_weight
