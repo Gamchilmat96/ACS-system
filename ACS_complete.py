@@ -19,6 +19,17 @@ app = Flask(__name__)
 # ----- 모델 설정 -----
 model = YOLO('best.pt')  # 학습된 YOLO 모델
 
+# ----- 프론트 엔드로 계기판 구성을 위한 변수 설정 -----(2025_06_24)
+RELOAD_DURATION = 4.0
+last_fire_time = 0.0  # 마지막 발사 시각
+is_reloading = False  # 재장전 중 여부
+last_log_time = 0.0        # 로깅 주기 제어용
+destroyed_ids = set()
+TOTAL_ENEMY_COUNT = 5
+
+# ===== MJPEG 스트리밍 =====(2025_06_24)
+IMAGE_PATH = 'temp_image.jpg'  # YOLO 처리 후 덮어쓰는 임시 이미지
+
 # ----- 탱크 크기 정보 -----
 # 게임 내 플레이어와 적 탱크의 차체/포탑 크기를 정의합니다. (가로, 세로, 높이)
 PLAYER_BODY_SIZE   = (3.667, 1.582, 8.066) # 우리 탱크의 차체 크기 (가로, 세로, 높이)
@@ -41,6 +52,7 @@ PITCH_FIRE_THRESHOLD_DEG = 0.1 # 수직오차각도 허용범위
 PITCH_ADJUST_RANGE_FOR_WEIGHT = 30.0 # 상하속도 조절 weight
 AIMING_YAW_OFFSET_DEG        = -0.5
 PITCH_AIM_OFFSET_DEG         = 1.2
+is_aligning = False    #detection 완료후 조준 정렬(2025_06_24)
 
 # ── 스캔 모드용 전역 변수 (90° 스텝) ──
 SCAN_STEP_DEG   = 90.0    # 한 스텝당 회전량
@@ -53,13 +65,14 @@ scan_lap_count  = 0     # 완료된 회전 수 카운트
 # ----- 자율주행 모듈 전역 설정 -----
 GRID_SIZE = 300
 maze = [[0]*GRID_SIZE for _ in range(GRID_SIZE)]
-DESTINATIONS = [(130, 180)]
+DESTINATIONS = [(290,290)]
 current_dest_index = 0
-TARGET_THRESHOLD = 30.0
+TARGET_THRESHOLD = 10.0
 ANGLE_THRESHOLD  = 0.1
 FOV_DEG          = 70
 DIST_THRESH      = 15
 MAX_DIFF         = 30
+VEHICLE_RADIUS = 4  # 탱크의 반지름 (그리드 셀 단위), 튜닝 필요 -> 차 크기를 고려하여 벽과의 거리 확보(2025_06_24)
 
 device_yaw       = 0.0
 previous_pos     = None
@@ -114,10 +127,42 @@ PITCH_MODEL_COEFFS = [
 ]
 pitch_equation_model    = np.poly1d(PITCH_MODEL_COEFFS)
 
+# --- '갇힘' 상태 감지 변수 --- -> 일정시간동안 갇혔다고 판단되면 주변을 장애물로 인식(2025_06_24)
+STUCK_CHECK_FRAMES = 25
+STUCK_DISTANCE_THRESHOLD = 2.0
+position_history = deque(maxlen=STUCK_CHECK_FRAMES)
+is_stuck = False
+
 # ----------------------------------------------------------------------------
 # 헬퍼 함수들
 # ----------------------------------------------------------------------------
-
+# 자율주행중 맵 탐색에서 장애물 발견시 경로 조정에 관여하는 함수(2025_06_24)
+def create_planning_maze(original_maze: list, grid_size: int, vehicle_radius: int) -> list:
+    planning_maze = [row[:] for row in original_maze]
+    obstacles = [(r, c) for r in range(grid_size) for c in range(grid_size) if original_maze[r][c] == 1]
+    for r_obs, c_obs in obstacles:
+        for dr in range(-vehicle_radius, vehicle_radius + 1):
+            for dc in range(-vehicle_radius, vehicle_radius + 1):
+                if dr*dr + dc*dc > vehicle_radius*vehicle_radius: continue
+                nr, nc = r_obs + dr, c_obs + dc
+                if 0 <= nr < grid_size and 0 <= nc < grid_size:
+                    planning_maze[nr][nc] = 1
+    return planning_maze
+# 자율주행중 맵 탐색에서 장애물 발견시 경로 조정에 관여하는 함수(2025_06_24)
+def create_cost_map(original_maze: list, grid_size: int, penalty: int = 130, influence_radius: int = 2) -> list:
+    cost_map = [[0] * grid_size for _ in range(grid_size)]
+    obstacles = [(r, c) for r in range(grid_size) for c in range(grid_size) if original_maze[r][c] == 1]
+    for r_obs, c_obs in obstacles:
+        for dr in range(-influence_radius, influence_radius + 1):
+            for dc in range(-influence_radius, influence_radius + 1):
+                nr, nc = r_obs + dr, c_obs + dc
+                if 0 <= nr < grid_size and 0 <= nc < grid_size and original_maze[nr][nc] == 0:
+                    distance = max(abs(dr), abs(dc))
+                    if distance == 0: continue
+                    current_penalty = penalty / distance
+                    cost_map[nr][nc] = max(cost_map[nr][nc], current_penalty)
+    return cost_map
+    
 def world_to_grid(x: float, z: float) -> tuple:
     """
     세계 좌표 (x, z)를 그리드 인덱스 (i, j)로 변환.
@@ -346,46 +391,45 @@ def _get_filtered_lidar_points():
     if not isinstance(raw_points, list): return []
     # 'lidarPoints' 리스트에서 수직각(verticalAngle)이 0.0이고, 실제로 감지된(isDetected) 포인트만 추출
     return [p for p in raw_points if p.get('verticalAngle') == 0.0 and p.get('isDetected')]
-
-def _find_distance_for_detection(detection, lidar_points, state):
-    """탐지된 객체 하나와 LiDAR 포인트 목록을 받아, 가장 일치하는 거리 값을 찾아 반환합니다."""
-    # 1. 탐지된 객체의 절대 각도 계산
+#원하는 목표에 대한 거리값을 산출하는 함수(2025_06_24)
+def _find_distance_for_detection(detection, lidar_points, state, cone_width=3.0):
     x1, _, x2, _ = detection['bbox']
-    u_center = (x1 + x2) / 2.0 # 바운딩박스 중앙을 잡음
-    phi_offset = (u_center / IMAGE_W - 0.5) * HFOV # 정규화 한후에 각도값으로 변환
-    phi_global_enemy = (state['turret_yaw'] + phi_offset + AIMING_YAW_OFFSET_DEG + 360) % 360 # 적게 움직이는 방향으로 만듦
-    
-    # 이 계산된 phi 값을 detection 딕셔너리에 추가하여 나중에 사용할 수 있게 합니다.
+    u_center = (x1 + x2) / 2.0
+    phi_offset = (u_center / IMAGE_W - 0.5) * HFOV
+    phi_global_enemy = (state['turret_yaw'] + phi_offset + AIMING_YAW_OFFSET_DEG + 360) % 360
     detection['phi'] = phi_global_enemy
-
-    # 2. 각도 차이가 가장 작은 LiDAR 포인트 찾기
-    # smallest_angular_diff : 가장 작은 각도 차이를 저장할 변수
-    best_match, smallest_angular_diff = None, float('inf')
-
-    # 필터링된 모든 LiDAR 포인트에 대해 반복
+    #목표가 존재하는 각도 방향을 기준으로 cone_width만큼 범위내에서 후보 distance를 선별(2025_06_24)
+    matching_dists = []
     for point in lidar_points:
-         # LiDAR 포인트의 전역 각도를 계산
-        lidar_global_angle = (state['turret_yaw'] + point.get('angle', 0.0) + 360) % 360
+        if not point.get('isDetected'): continue
+        lidar_global_angle = (state['turret_yaw'] + point.get('angle', 0.0)) % 360
+        angular_diff = (lidar_global_angle - phi_global_enemy + 180) % 360 - 180
+        if abs(angular_diff) <= cone_width:
+            matching_dists.append(point.get('distance'))
 
-        # 각 LiDAR 포인트의 전역 각도와 탐지된 적의 전역 각도 사이의 차이를 계산(-180 ~ 180도 범위)
-        angular_diff = (lidar_global_angle - phi_global_enemy + 180 + 360) % 360 - 180
-
-        # 현재 포인트의 각도 차이가 이전에 찾은 최소 차이보다 작으면,
-        if abs(angular_diff) < smallest_angular_diff:
-             # 이 포인트를 '가장 일치하는' 포인트로 간주하고 정보를 업데이트
-            smallest_angular_diff, best_match = abs(angular_diff), point
-
-    # 3. 거리 값 반환
-    # 가장 일치하는 LiDAR 포인트를 찾았다면,
-    # 해당 포인트의 거리(distance) 값을 반환
-    return best_match.get('distance') if best_match else None
+    if matching_dists:
+        return min(matching_dists)
+    else:
+        return None
 
 def _log_data(filepath, data):
     """주어진 데이터를 지정된 파일에 JSON 형태로 로그를 남깁니다."""
     with log_lock, open(filepath, 'a', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False)
         f.write('\n')
-
+#웹 프론트에서 이미지를 생성해서 파싱해주는 함수(2025_06_24)
+def generate_mjpeg():
+    """temp_image.jpg 를 읽어서 MJPEG 스트림용 바이트 시퀀스 생성"""
+    while True:
+        if os.path.exists(IMAGE_PATH):
+            frame = cv2.imread(IMAGE_PATH)
+            if frame is not None:
+                ret, jpeg = cv2.imencode('.jpg', frame)
+                if ret:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' +
+                           jpeg.tobytes() + b'\r\n')
+        time.sleep(0.1)  # 스트리밍 속도 조절 (0.1초 간격)
 # ----------------------------------------------------------------------------
 # 주요 엔드포인트
 # ----------------------------------------------------------------------------
@@ -402,9 +446,68 @@ def init():
 def info():
     """시뮬레이터로부터 주기적으로 탱크의 상태 정보(LiDAR 포함)를 받아 전역 변수에 저장합니다."""
     global last_lidar_data
-    last_lidar_data = request.get_json(force=True) or {}
+    payload = request.get_json(force=True, silent=True) or {}
+    last_lidar_data = payload
     return jsonify({'status': 'success', 'control': ''})
+    
+# 상태 변수들에 대한 내용 갱신(2025_06_24)
+# 상태 조회 API (예시)
+@app.route('/status', methods=['GET'])
+def get_status():
+    global last_lidar_data, is_reloading, last_fire_time, destroyed_ids
 
+    # 안전하게 딕셔너리 대체
+    ld = last_lidar_data or {}
+
+    # 1) 재장전 상태 계산
+    if is_reloading:
+        elapsed = time.time() - last_fire_time
+        can_fire = elapsed >= RELOAD_DURATION
+    else:
+        can_fire = True
+
+    # 2) 속도 가져오기 (playerSpeed)
+    speed = ld.get("playerSpeed", 0.0)
+
+    # 3) 위치 가져오기 (playerPos)
+    pos = ld.get("playerPos", {})
+    # playerPos가 dict인 경우
+    if isinstance(pos, dict):
+        pos_x = pos.get("x", 0.0)
+        pos_z = pos.get("z", 0.0)
+    # playerPos가 리스트/튜플인 경우 (예: [x,y,z])
+    elif isinstance(pos, (list, tuple)) and len(pos) >= 3:
+        pos_x, _, pos_z = pos[0], pos[1], pos[2]
+    else:
+        pos_x = pos_z = 0.0
+
+    # 4) 격파 현황
+    destroyed_count = len(destroyed_ids)
+    remaining = TOTAL_ENEMY_COUNT - destroyed_count
+
+    return jsonify({
+        "speed": speed,
+        "position": {
+            "x": pos_x,
+            "z": pos_z
+        },
+        "destination": {
+            "x": DESTINATIONS[0][0],
+            "z": DESTINATIONS[0][1]
+        },
+        "can_fire": can_fire,
+        "enemy_status": {
+            "destroyed": destroyed_count,
+            "total": TOTAL_ENEMY_COUNT,
+            "remaining": remaining
+        }
+    })
+
+#갱신한 상태 변수들을 계기판에 기재하기 위한 API(2025_06_24)
+@app.route('/dashboard')
+def show_dashboard():
+    return render_template('dashboard.html')
+    
 @app.route('/detect', methods=['POST'])
 def detect():
     """메인 탐지 로직: 이미지와 LiDAR 데이터를 융합하여 적의 거리를 계산합니다."""
@@ -454,7 +557,16 @@ def detect():
     _log_data('logs/enemy.json', last_enemy_data)
     # 탐지 결과를 JSON 형태로 클라이언트에게 반환
     return jsonify(yolo_detections)
-
+    
+#웹 프론트에서 동영상처럼 생성한 temp 이미지를 활용하는 api(2025_06_24)
+@app.route('/video_feed')
+def video_feed():
+    """MJPEG 스트리밍(멀티파트)"""
+    return Response(
+        generate_mjpeg(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
+    
 @app.route('/get_action', methods=['POST'])
 def get_action():
     # 이 함수에서 사용할 모든 전역 변수 선언
@@ -462,7 +574,10 @@ def get_action():
     global scan_origin_yaw, scan_index, pause_start, scan_lap_count
     global locked_target_info, last_sighting_time, last_engagement_end_time
     global aim_settle_start_time, last_engagement_phi, is_limited_searching, limited_search_step
-    
+    global last_fire_time, is_reloading
+    global is_stuck
+    global is_aligning
+
     # 게임에서 현재 내 탱크 위치(x, z) 및 라이다 정보 받아오기
     data = request.get_json(force=True) or {}
     pos = data.get('position', {})
@@ -538,6 +653,12 @@ def get_action():
         if fire_ready:
             cmd['fire'] = True
             aim_settle_start_time = 0
+            # 재장전 시작 설정(2025_06_24)
+            is_reloading = True
+            last_fire_time = time.time()
+            # 사격이 끝나면 정렬 모드로 전환(2025_06_24)
+            is_aligning = True
+            
         else:
             if abs(delta_yaw) > FIRE_THRESHOLD_DEG:
                 w = min(min(abs(delta_yaw)/180,1)*5,1)
@@ -547,7 +668,31 @@ def get_action():
                 cmd['turretRF'] = {'command': 'R' if delta_pitch>0 else 'F', 'weight': w}
 
         return jsonify(cmd)
+     # 3) 전투 블록을 빠져나왔을 때 (더 이상 적이 없거나 탐지 종료)(2025_06_24)
+     #    그리고 정렬 모드가 활성화되어 있으면 포신을 차체 정면으로 돌립니다.
+    if is_aligning:
+        cmd = {'moveWS': {}, 'moveAD': {}, 'turretQE': {}, 'turretRF': {}, 'fire': False}
 
+        # body_yaw는 last_lidar_data에서 가져올 수도 있고, 
+        # current_state에 미리 저장해둔 값이 있을 수도 있습니다.
+        body_yaw = last_lidar_data.get('playerBodyX', device_yaw)  
+        turret_yaw = last_lidar_data.get('playerTurretX', 0.0)
+
+        # [-180,180] 구간으로 차이 계산
+        diff = ((body_yaw - turret_yaw + 180) % 360) - 180  
+
+        # 문턱값(예: 2도 이내) 이내로 들어오면 정렬 완료
+        if abs(diff) < 2.0:
+            is_aligning = False
+            # 아무 동작 없이 정렬 완료
+        else:
+            # TURRQE 축(E/Q)로 회전 명령
+            cmd['turretQE'] = {
+                'command': 'E' if diff > 0 else 'Q',
+                'weight': min(abs(diff) / 180.0, 1.0)
+            }
+        
+        return jsonify(cmd)
     # --- B) 자율주행: 목표 미도달 시 ------------------------------------------------------
     elif not goal_reached:
         dest_x, dest_z = DESTINATIONS[current_dest_index]
@@ -576,23 +721,45 @@ def get_action():
         target_yaw = calculate_angle(start, next_cell)
         diff = ((target_yaw - device_yaw + 180) % 360) - 180
 
-        # 장애물 회피
-        if obstacle_ahead(lidar_points):
-            avoid = compute_avoidance_direction_weighted(lidar_points, device_yaw)
-            diff = ((avoid - device_yaw + 180) % 360) - 180
-            move_ad = {'command': 'A' if diff>0 else 'D', 'weight': min(abs(diff)/MAX_DIFF,1.0)}
-        elif abs(diff) > ANGLE_THRESHOLD:
-            move_ad = {'command': 'A' if diff>0 else 'D', 'weight': 0.2}
-        else:
-            move_ad = {}
+        # 다음 셀로 향하는 목표 yaw 계산(2025_06_24)
+        #6. 이동 명령 생성
+        look_ahead_index = min(len(path) - 1, 5)
+        next_cell = path[look_ahead_index]
+        target_yaw = calculate_angle(start, next_cell)
+        diff = (target_yaw - device_yaw + 360) % 360
+        if diff > 180:
+            diff -= 360
+
+        # 장애물 회피(2025_06_24)
+        move_ad_cmd = {}
+        if obstacle_ahead(lidar_points) and not is_stuck: # 장애물이 있을때 (lidar point 사용)&& 끼임이 없을 때 회피(2025_06_24)
+            # 장애물 회피용 목표 각도
+            avoid_yaw = compute_avoidance_direction_weighted(lidar_points, device_yaw)
+            diff = ((avoid_yaw - device_yaw + 360) % 360)
+            print(f"현재 DIFF 값은 {diff} 입니다.")
+            if diff > 180: 
+                diff -= 360
+            print(f"장애물을 탐지했습니다. 회피가 필요한 구간입니다.")
+            move_ad_cmd = {
+                'command': 'A' if diff > 0 else 'D',
+                'weight': min(abs(diff) / MAX_DIFF, 1.0)
+                }
             
+        else:
+            if abs(diff) < ANGLE_THRESHOLD:
+                move_ad_cmd = {'command': '', 'weight': 0.0}
+            else:
+                move_ad_cmd = {
+                    'command': 'A' if diff > 0 else 'D',
+                    'weight': 0.2 # 가중치 0.2->0.4변경(2025_06_24)
+                }
+        })
         forward_weight = compute_forward_weight(lidar_points) # 2025_06_16(장애물 근접시 속도를 늦춤)
         return jsonify({
-            'moveWS': {'command':'W','weight':0.3},
-            'moveAD': move_ad,
+            'moveWS': {'command':'W','weight':forward_weight},  # 0.3 -> forward_weight
+            'moveAD': move_ad_cmd,
             'turretQE': {}, 'turretRF': {}, 'fire': False
         })
-
     # --- C) 목표 도달 후 스캔 모드 -------------------------------------------------------
     else:
         cmd = {'moveWS': {'command':'STOP','weight':1.0},
@@ -616,22 +783,41 @@ def get_action():
 
         # 일반 90° 스텝 스캔
         if scan_origin_yaw is None:
-            scan_origin_yaw, scan_index, pause_start, scan_lap_count = turret_yaw_current, 0, None, 0
+            scan_origin_yaw, scan_index, pause_start, scan_lap_count = -90, 0, None, 0
+
         target_yaw = (scan_origin_yaw + SCAN_STEP_DEG*scan_index) % 360
+
         d = ((target_yaw - turret_yaw_current + 180) % 360) - 180
-        if abs(d) > 1:
+
+        # 목표 전까지 회전(2025_06_24)
+        if abs(d)>1.0:
             pause_start = None
-            w = min(abs(d)/30,0.5)
+            w = min(abs(d)/60.0,0.5) # 가로회전속도
             cmd['turretQE'] = {'command':'E' if d>0 else 'Q','weight':w}
         else:
+            # 목표 도달 후 대기(2025_06_24)
             if pause_start is None:
                 pause_start = time.time()
-            elif time.time() - pause_start >= PAUSE_SEC:
+            if time.time() - pause_start < PAUSE_SEC:
+                cmd['turretQE'] = {'command':'','weight':0.0}
+            else:
                 scan_index += 1
                 if scan_index >= int(360/SCAN_STEP_DEG):
-                    scan_index, scan_lap_count = 0, scan_lap_count+1
-                if scan_lap_count < 2:
-                    pause_start = None
+                    scan_index     = 0
+                    scan_lap_count += 1
+                    
+
+                # 2바퀴 돌았으면 정면 복귀 로직 -> # 1바퀴 돌고 종료(2025_06_24)
+                if scan_lap_count >= 1:
+                    delta_to_origin = ((scan_origin_yaw - turret_yaw_current + 180) % 450) - 180 # 정면으로 복귀, 360+45로 각도를 줌 -> -45도에서 시작(2025_06_24)
+                    if abs(delta_to_origin)>1.0:
+                        w = min(abs(delta_to_origin)/60.0,0.5)
+                        cmd['turretQE'] = {'command':'E' if delta_to_origin>0 else 'Q','weight':w}
+                    else:
+                        scan_done = True
+                        cmd['turretQE'] = {'command':'','weight':0.0}
+                    return jsonify(cmd)
+                pause_start = None
 
         return jsonify(cmd)
 
@@ -669,7 +855,20 @@ def get_collision_count():
         return jsonify({'collision_count':collision_count})
 
 @app.route('/update_bullet', methods=['POST'])
-def update_bullet(): return jsonify({'status':'OK','message':'Bullet impact data received'})
+def update_bullet():
+    global destroyed_ids
+    data = request.get_json()
+    if not data:
+        return jsonify({"status": "ERROR", "message": "Invalid request data"}), 400
+
+    hit = data.get('hit')
+    print(f"💥 Bullet Impact at X={data.get('x')}, Y={data.get('y')}, Z={data.get('z')}, Target={hit}")
+
+    # 만약 hit 값이 'Tank...' 형식이라면 이 ID를 파괴된 것으로 추가(2025_06_24)
+    if isinstance(hit, str) and hit.startswith("Tank"):
+        destroyed_ids.add(hit)
+
+    return jsonify({"status": "OK", "message": "Bullet impact data received"})
 
 @app.route('/get_map', methods=['GET'])
 def get_map():
@@ -683,4 +882,4 @@ if __name__ == '__main__':
     # logs 폴더가 없으면 생성
     if not os.path.exists('logs'):
         os.makedirs('logs')
-    app.run(host='0.0.0.0', port=5007)
+    app.run(host='0.0.0.0', port=5000)
