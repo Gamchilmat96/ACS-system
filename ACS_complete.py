@@ -73,7 +73,7 @@ ANGLE_THRESHOLD  = 0.1
 FOV_DEG          = 70
 DIST_THRESH      = 15
 MAX_DIFF         = 30
-VEHICLE_RADIUS = 4  # 탱크의 반지름 (그리드 셀 단위), 튜닝 필요 -> 차 크기를 고려하여 벽과의 거리 확보(2025_06_24)
+# VEHICLE_RADIUS = 4  # 탱크의 반지름 (그리드 셀 단위), 튜닝 필요 -> 차 크기를 고려하여 벽과의 거리 확보(2025_06_24)
 
 device_yaw       = 0.0
 previous_pos     = None
@@ -138,6 +138,7 @@ is_stuck = False
 # 헬퍼 함수들
 # ----------------------------------------------------------------------------
 # 자율주행중 맵 탐색에서 장애물 발견시 경로 조정에 관여하는 함수(2025_06_24)
+'''
 def create_planning_maze(original_maze: list, grid_size: int, vehicle_radius: int) -> list:
     planning_maze = [row[:] for row in original_maze]
     obstacles = [(r, c) for r in range(grid_size) for c in range(grid_size) if original_maze[r][c] == 1]
@@ -149,7 +150,9 @@ def create_planning_maze(original_maze: list, grid_size: int, vehicle_radius: in
                 if 0 <= nr < grid_size and 0 <= nc < grid_size:
                     planning_maze[nr][nc] = 1
     return planning_maze
+'''
 # 자율주행중 맵 탐색에서 장애물 발견시 경로 조정에 관여하는 함수(2025_06_24)
+'''
 def create_cost_map(original_maze: list, grid_size: int, penalty: int = 130, influence_radius: int = 2) -> list:
     cost_map = [[0] * grid_size for _ in range(grid_size)]
     obstacles = [(r, c) for r in range(grid_size) for c in range(grid_size) if original_maze[r][c] == 1]
@@ -163,7 +166,7 @@ def create_cost_map(original_maze: list, grid_size: int, penalty: int = 130, inf
                     current_penalty = penalty / distance
                     cost_map[nr][nc] = max(cost_map[nr][nc], current_penalty)
     return cost_map
-    
+'''    
 def world_to_grid(x: float, z: float) -> tuple:
     """
     세계 좌표 (x, z)를 그리드 인덱스 (i, j)로 변환.
