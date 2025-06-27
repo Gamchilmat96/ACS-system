@@ -1,4 +1,4 @@
-#깃에 같이 올려놓은 TESTMap 과 같이 사용하는걸 권장합니다.
+# 깃에 같이 올려놓은 TESTMap 과 같이 사용하는걸 권장합니다.
 # =============================================================================
 # Flask 서버: 자율주행 → 정지 후 자율조준 통합 구현
 # =============================================================================
@@ -24,7 +24,7 @@ model = YOLO('best.pt')  # 학습된 YOLO 모델
 RELOAD_DURATION = 4.0
 last_fire_time = 0.0  # 마지막 발사 시각
 is_reloading = False  # 재장전 중 여부
-last_log_time = 0.0        # 로깅 주기 제어용
+last_log_time = 0.0     # 로깅 주기 제어용
 destroyed_ids = set()
 TOTAL_ENEMY_COUNT = 5
 
@@ -66,14 +66,14 @@ scan_lap_count  = 0     # 완료된 회전 수 카운트
 # ----- 자율주행 모듈 전역 설정 -----
 GRID_SIZE = 300
 maze = [[0]*GRID_SIZE for _ in range(GRID_SIZE)]
-DESTINATIONS = [(290,290)]
+DESTINATIONS = [(20,280)]
 current_dest_index = 0
-TARGET_THRESHOLD = 10.0
+TARGET_THRESHOLD = 20.0
 ANGLE_THRESHOLD  = 0.1
 FOV_DEG          = 70
-DIST_THRESH      = 15
+DIST_THRESH      = 20
 MAX_DIFF         = 30
-# VEHICLE_RADIUS = 4  # 탱크의 반지름 (그리드 셀 단위), 튜닝 필요 -> 차 크기를 고려하여 벽과의 거리 확보(2025_06_24)
+# VEHICLE_RADIUS = 30  # 탱크의 반지름 (그리드 셀 단위), 튜닝 필요 -> 차 크기를 고려하여 벽과의 거리 확보(2025_06_24)
 
 device_yaw       = 0.0
 previous_pos     = None
@@ -151,9 +151,15 @@ def create_planning_maze(original_maze: list, grid_size: int, vehicle_radius: in
                     planning_maze[nr][nc] = 1
     return planning_maze
 '''
-# 자율주행중 맵 탐색에서 장애물 발견시 경로 조정에 관여하는 함수(2025_06_24)
+
 '''
-def create_cost_map(original_maze: list, grid_size: int, penalty: int = 130, influence_radius: int = 2) -> list:
+일반적인 A*알고리즘은 움직이는 객체(tank)를 부피감이 없는 한개의 점으로 표시함
+현실세계의 tank는 부피감이 있으므로 통로를 통과할때 이를 고려하지 않는다면 벽과 충돌하게 된다.
+이를 방지하기 위해 맵위의 객체의 반지름을 팽창시킨다. 
+'''
+'''
+# 자율주행중 맵 탐색에서 장애물 발견시 경로 조정에 관여하는 함수(2025_06_24)
+def create_cost_map(original_maze: list, grid_size: int, penalty: int = 130, influence_radius: int = 4) -> list:
     cost_map = [[0] * grid_size for _ in range(grid_size)]
     obstacles = [(r, c) for r in range(grid_size) for c in range(grid_size) if original_maze[r][c] == 1]
     for r_obs, c_obs in obstacles:
@@ -166,7 +172,12 @@ def create_cost_map(original_maze: list, grid_size: int, penalty: int = 130, inf
                     current_penalty = penalty / distance
                     cost_map[nr][nc] = max(cost_map[nr][nc], current_penalty)
     return cost_map
-'''    
+    '''
+'''
+장애물을 회피하여 더 좋은 경로(원하는 경로)에 도달하기 위해서 penalty를 부과하는 함수
+장애물 주변에 거리가 멀어지면 penalty값이 감소하여 penalty가 적은 방향으로 움직이게 한다.
+'''
+
 def world_to_grid(x: float, z: float) -> tuple:
     """
     세계 좌표 (x, z)를 그리드 인덱스 (i, j)로 변환.
@@ -269,12 +280,15 @@ def a_star(start: tuple, goal: tuple) -> list:
 def calculate_angle(cur: tuple, nxt: tuple) -> float:
     """
     현재 셀(cur)에서 다음 셀(nxt)로 향하는 벡터의 yaw(방향) 각도 계산.
-    반환값 범위: [0, 360)
+    반환값 범위: [0, 360]
     """
     dx = nxt[0] - cur[0]
     dz = nxt[1] - cur[1]
     angle = math.degrees(math.atan2(dz, dx))
     return (angle + 360) % 360
+
+
+
 
 #전방에 장애물에 여부를 판단하는 함수 선언 2025_06_10 => 각도 범위값 변경(2025_06_11)
 def obstacle_ahead(lidar_points, fov_deg=FOV_DEG, dist_thresh=DIST_THRESH):
@@ -287,8 +301,14 @@ def obstacle_ahead(lidar_points, fov_deg=FOV_DEG, dist_thresh=DIST_THRESH):
             front_dists.append(p['distance'])
     return (min(front_dists) if front_dists else float('inf')) < dist_thresh
 
+
+'''
+DIST_THRESH범위 안에 장애물이 있는지 여부를 알려준다.
+시야각 60도 이내에서 감지가 되지 않거나 수직각이 0이 아닐때 동작
+'''
+
 #전방에 장애물이 존재하면 거리 가중치에 근거해서 회피각도를 결정하는 함수 선언 2025_06_11
-def compute_avoidance_direction_weighted(lidar_points, current_yaw, danger_dist=20.0, angle_delta=60):
+def compute_avoidance_direction_weighted(lidar_points, current_yaw, danger_dist=22.0, angle_delta=60):
     left_risk, right_risk = 0.0, 0.0
     left_count, right_count = 0, 0
 
@@ -319,9 +339,9 @@ def compute_avoidance_direction_weighted(lidar_points, current_yaw, danger_dist=
     else:
         return (current_yaw + angle_delta) % 360  # 왼쪽 회피
 
-def compute_forward_weight(lidar_points, min_w=0.1, max_w=0.3, slow_range=30.0, stop_range=15.0): # 2025_06_16(장애물에 근접시 속도변화)
+def compute_forward_weight(lidar_points, min_w=0.3, max_w=0.6, slow_range=40.0, stop_range=20.0): # 2025_06_16(장애물에 근접시 속도변화)
     # 가까움의 기준: 20m, 매우 가까움: 10m 이하일 땐 거의 정지
-    """
+    """vv
     전방 장애물 거리 기반 'W' weight 계산.
     - slow_range 이상: 최대 속도
     - stop_range 이하: 거의 정지
@@ -440,8 +460,8 @@ def generate_mjpeg():
 @app.route('/init', methods=['GET'])
 def init():
     return jsonify({
-        'startMode':'start','blStartX':150,'blStartY':10,'blStartZ':10, 'rdStartX':150,'rdStartY':10,'rdStartZ':290,
-        'trackingMode':False,'detactMode':True,'logMode':True, 'enemyTracking':False,'saveSnapshot':False,'saveLog':True,'saveLidarData':True,
+        'startMode':'start','blStartX':270,'blStartY':10,'blStartZ':20, 'rdStartX':290,'rdStartY':0,'rdStartZ':290,
+        'trackingMode':False,'detactMode':True,'logMode':True, 'enemyTracking':False,'saveSnapshot':False,'saveLog':False,'saveLidarData':False,
         'lux':30000, 'player_body_size':PLAYER_BODY_SIZE,'player_turret_size':PLAYER_TURRET_SIZE,
         'enemy_body_size':ENEMY_BODY_SIZE,'enemy_turret_size':ENEMY_TURRET_SIZE
     })
@@ -781,8 +801,6 @@ def get_action():
         cmd = {'moveWS': {'command':'STOP','weight':1.0},
                'moveAD': {}, 'turretQE': {}, 'turretRF': {}, 'fire': False}
 
-        #코드전체수정 (포탑 90도씩 회전 탐색 -> 주행이후 정지)_0624
-
         # last_lidar_data가 있을 경우 playerBodyX 값을, 없으면 이전 device_yaw 값을 사용
         body_yaw = last_lidar_data.get('playerBodyX', device_yaw) if last_lidar_data else device_yaw
         turret_yaw_current = last_lidar_data.get('playerTurretX', 0.0) if last_lidar_data else 0.0
@@ -847,7 +865,7 @@ def update_bullet():
         return jsonify({"status": "ERROR", "message": "Invalid request data"}), 400
 
     hit = data.get('hit')
-    print(f"💥 Bullet Impact at X={data.get('x')}, Y={data.get('y')}, Z={data.get('z')}, Target={hit}")
+    print(f"Bullet Impact at X={data.get('x')}, Y={data.get('y')}, Z={data.get('z')}, Target={hit}")
 
     # 만약 hit 값이 'Tank...' 형식이라면 이 ID를 파괴된 것으로 추가(2025_06_24)
     if isinstance(hit, str) and hit.startswith("Tank"):
@@ -867,4 +885,4 @@ if __name__ == '__main__':
     # logs 폴더가 없으면 생성
     if not os.path.exists('logs'):
         os.makedirs('logs')
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5003)
