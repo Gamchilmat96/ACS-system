@@ -128,6 +128,12 @@ PITCH_MODEL_COEFFS = [
 ]
 pitch_equation_model    = np.poly1d(PITCH_MODEL_COEFFS)
 
+'''
+다항 선형회귀 분석 : 두변수의 선형적인 관계를 이용하여 종속변수값을 예측하는 하는 통계기법
+거리에 따른 사정거리를 변수로 하여 y=a0 + a1*x + a1*x^2 + a3*x^3 라는 식으로 예측
+최소제곱법을 이용하여 행렬식을 계산 -> a0,a1,a2,a3를 구하고, 거리를 대입하여 사정거리를 계산
+'''
+
 # --- '갇힘' 상태 감지 변수 --- -> 일정시간동안 갇혔다고 판단되면 주변을 장애물로 인식(2025_06_24)
 STUCK_CHECK_FRAMES = 25
 STUCK_DISTANCE_THRESHOLD = 2.0
@@ -139,6 +145,7 @@ is_stuck = False
 # ----------------------------------------------------------------------------
 # 자율주행중 맵 탐색에서 장애물 발견시 경로 조정에 관여하는 함수(2025_06_24)
 '''
+# 제외해도 코드가 조건에 맞게 동작됨
 def create_planning_maze(original_maze: list, grid_size: int, vehicle_radius: int) -> list:
     planning_maze = [row[:] for row in original_maze]
     obstacles = [(r, c) for r in range(grid_size) for c in range(grid_size) if original_maze[r][c] == 1]
@@ -150,12 +157,12 @@ def create_planning_maze(original_maze: list, grid_size: int, vehicle_radius: in
                 if 0 <= nr < grid_size and 0 <= nc < grid_size:
                     planning_maze[nr][nc] = 1
     return planning_maze
-'''
+''' 
 
 '''
 일반적인 A*알고리즘은 움직이는 객체(tank)를 부피감이 없는 한개의 점으로 표시함
 현실세계의 tank는 부피감이 있으므로 통로를 통과할때 이를 고려하지 않는다면 벽과 충돌하게 된다.
-이를 방지하기 위해 맵위의 객체의 반지름을 팽창시킨다. 
+이를 방지하기 위해 맵위의 벽을 탱크의 반지름만큼 팽창시킨다. 
 '''
 '''
 # 자율주행중 맵 탐색에서 장애물 발견시 경로 조정에 관여하는 함수(2025_06_24)
@@ -435,6 +442,14 @@ def _find_distance_for_detection(detection, lidar_points, state, cone_width=3.0)
         return min(matching_dists)
     else:
         return None
+'''
+YOLO + 라이다 => 객체의 이름정보를 알고 있는 YOLO + 객체가 있고 그 거리값을 아는 Lidar
+좌우각도계산 : bbox를 기준으로 중앙을 기준으로 잡음; 각도는 -0.5~0.5로 정규화
+             수평시야각과 곱하여 화면 중앙을 기준으로 실제 각도 차이 계산
+거리계산 : 적의 방향과 일치히는 Lidar점들의 거리를 목록에 담고 유효하지 않은 점은 제외
+          -> 각도차이를 계산하여 3도 이내면 가져온 거리값이 true이고 이를 matching_dists목록에 추가
+          그중 가장 짧은 거리를 반환, 일치하는 점이 없다면 None을 반환
+'''
 
 def _log_data(filepath, data):
     """주어진 데이터를 지정된 파일에 JSON 형태로 로그를 남깁니다."""
@@ -666,6 +681,7 @@ def get_action():
         phi_t, dist_t = target['phi'], target['distance']
         desired_pitch = calculate_target_pitch(dist_t) + PITCH_AIM_OFFSET_DEG
         delta_yaw = ((phi_t - turret_yaw_current + 180) % 360) - 180
+        # 작은 각도로 반환되게 계산 (오른쪽으로 320도 = 왼쪽으로 40도)
         delta_pitch = desired_pitch - current_turret_pitch
         
         # log에 detecting된 전차와의 거리 및 각도 출력 (2025_06_19)
@@ -725,7 +741,7 @@ def get_action():
             # TURRQE 축(E/Q)로 회전 명령
             cmd['turretQE'] = {
                 'command': 'E' if diff > 0 else 'Q',
-                'weight': min(abs(diff) / 45.0, 1.5) # 터렛정렬 속도 증가 _0624
+                'weight': min(abs(diff) / 45.0, 1.5) # 터렛정렬 속도 증가 (0624)
             }
         
         return jsonify(cmd)
@@ -844,6 +860,10 @@ def update_obstacle():
         i,j=world_to_grid(float(x),float(z))
         maze[i][j]=1
     return jsonify({'status':'ok'})
+'''
+장애물의 좌표를 1로 변경하여 장애물로 영구하게 기록한다. (지도를 만든다고 생각)
+
+'''
 
 @app.route('/collision', methods=['POST'])
 def collision():
