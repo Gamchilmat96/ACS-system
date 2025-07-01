@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>전차 실시간 영상 & 미니맵</title>
+  <style>
+    html, body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+    }
+        body::-webkit-scrollbar {
+        display: none;
+    }
+    body{
+        font-family:'Segoe UI';
+        background:#121212;
+        color:#f0f0f0;
+        margin:0;
+        padding:20px;
+    }
+    h2{
+        font-size:45px;
+        text-align:center;
+        color:#00d1b2;
+        margin-bottom:20px;
+    }
+    .container{
+        display: grid;
+        grid-template-columns: 1fr; /* 한 줄에 한 칸 */
+        gap: 10px;
+        padding: 0;
+        width: 100%;
+    }
+    .card{
+        background:#1e1e1e;
+        border-radius:12px;
+        padding:20px;
+        box-shadow:0 4px 12px rgba(0,0,0,0.4);
+        text-align:center;}
+    .video-card img{
+        width:100%;
+        border-radius:8px;
+        display:block;}
+    canvas{
+        width:100%;
+        height:auto;
+        border:1px solid #444;
+        background:#111;
+        display:block;
+    }
+  </style>
+</head>
+<body>
+  <h2>전차 실시간 영상 & 미니맵</h2>
+  <div class="container">
+    <div class="card video-card">
+      <div class="label">실시간 영상</div>
+      <img src="{{ url_for('video_feed') }}" alt="Live Stream">
+    </div>
+    <div class="card">
+      <div class="label">LiDAR 미니맵 (Map + Scan)</div>
+      <canvas id="miniMap" width="400" height="400"></canvas>
+    </div>
+  </div>
+  <script>
+  const canvas = document.getElementById('miniMap');
+  const ctx    = canvas.getContext('2d');
+  const W      = canvas.width, H = canvas.height;
+  const cx     = W/2, cy = H/2;
+  const RANGE  = 50;  // LiDAR 최대 사거리(m)
+
+  async function fetchLidar() {
+    const res = await fetch('/status');
+    const data = await res.json();
+    const pts = (data.lidarPoints||[])
+                  .filter(p => p.verticalAngle === 0 && p.isDetected);
+    drawMap(pts);
+  }
+
+  function drawMap(points) {
+    // 1) 좌표계 회전: 캔버스 중심을 기준으로 왼쪽(반시계) 90도
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(-Math.PI/2);
+    ctx.translate(-cx, -cy);
+    // 배경
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, W, H);
+
+    // LiDAR 스캔 폴리곤
+    if (points.length) {
+      // 각도 오름차순 정렬
+      points.sort((a, b) => a.angle - b.angle);
+
+      ctx.strokeStyle = '#00ffd5';
+      ctx.lineWidth   = 2;
+      ctx.beginPath();
+
+      points.forEach((p,i)=>{
+        const rad = p.angle * Math.PI/180;
+        const dx  = p.distance * Math.cos(rad);
+        const dz  = p.distance * Math.sin(rad);
+        // 화면 좌표 (수평축: +dx → 우, 수직축: +dz → 아래)
+        const xC = cx + (dx / RANGE) * (W/2);
+        const yC = cy + (dz / RANGE) * (H/2);  // ← 부호를 +로 바꿨습니다
+
+        if(i===0) ctx.moveTo(xC,yC);
+        else      ctx.lineTo(xC,yC);
+        });
+
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    // 차량 위치 (중앙 빨강 점)
+    ctx.fillStyle = '#ff4c4c';
+    ctx.beginPath();
+    ctx.arc(cx, cy, 5, 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 0.3초마다 업데이트
+  setInterval(fetchLidar, 300);
+</script>
+</body>
+</html>
