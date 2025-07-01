@@ -15,7 +15,7 @@ import numpy as np
 from queue import PriorityQueue
 from ultralytics import YOLO
 from collections import deque
-app = Flask(__name__)
+app = Flask(__name__, template_folder='./templates')
 
 # ----- 모델 설정 -----
 model = YOLO('best.pt')  # 학습된 YOLO 모델
@@ -107,7 +107,7 @@ POST_ENGAGEMENT_DELAY_SEC = 2.0
 aim_settle_start_time = 0
 # AIM_SETTLE_DURATION_SEC: 조준이 '대충 맞은' 상태로 이 시간(초) 이상 유지되면, 완벽하지 않아도 발사!
 #                          계속 움직이는 적을 상대로 조준만 하다가 아무것도 못 하는 상황을 방지.
-AIM_SETTLE_DURATION_SEC = 0.8 #(0.25 -> 0.8)_0624수정
+AIM_SETTLE_DURATION_SEC = 3.0 #(0.25 -> 0.8)_0624수정
 
 # --- 제한적 탐색(Limited Search) 관련 변수: '스마트 스캔' 기능을 담당합니다. ---
 # last_engagement_phi: 마지막으로 적을 놓친 지점의 각도를 기억.
@@ -128,12 +128,6 @@ PITCH_MODEL_COEFFS = [
 ]
 pitch_equation_model    = np.poly1d(PITCH_MODEL_COEFFS)
 
-'''
-다항 선형회귀 분석 : 두변수의 선형적인 관계를 이용하여 종속변수값을 예측하는 하는 통계기법
-거리에 따른 사정거리를 변수로 하여 y=a0 + a1*x + a1*x^2 + a3*x^3 라는 식으로 예측
-최소제곱법을 이용하여 행렬식을 계산 -> a0,a1,a2,a3를 구하고, 거리를 대입하여 사정거리를 계산
-'''
-
 # --- '갇힘' 상태 감지 변수 --- -> 일정시간동안 갇혔다고 판단되면 주변을 장애물로 인식(2025_06_24)
 STUCK_CHECK_FRAMES = 25
 STUCK_DISTANCE_THRESHOLD = 2.0
@@ -144,46 +138,6 @@ is_stuck = False
 # 헬퍼 함수들
 # ----------------------------------------------------------------------------
 # 자율주행중 맵 탐색에서 장애물 발견시 경로 조정에 관여하는 함수(2025_06_24)
-'''
-# 제외해도 코드가 조건에 맞게 동작됨
-def create_planning_maze(original_maze: list, grid_size: int, vehicle_radius: int) -> list:
-    planning_maze = [row[:] for row in original_maze]
-    obstacles = [(r, c) for r in range(grid_size) for c in range(grid_size) if original_maze[r][c] == 1]
-    for r_obs, c_obs in obstacles:
-        for dr in range(-vehicle_radius, vehicle_radius + 1):
-            for dc in range(-vehicle_radius, vehicle_radius + 1):
-                if dr*dr + dc*dc > vehicle_radius*vehicle_radius: continue
-                nr, nc = r_obs + dr, c_obs + dc
-                if 0 <= nr < grid_size and 0 <= nc < grid_size:
-                    planning_maze[nr][nc] = 1
-    return planning_maze
-''' 
-
-'''
-일반적인 A*알고리즘은 움직이는 객체(tank)를 부피감이 없는 한개의 점으로 표시함
-현실세계의 tank는 부피감이 있으므로 통로를 통과할때 이를 고려하지 않는다면 벽과 충돌하게 된다.
-이를 방지하기 위해 맵위의 벽을 탱크의 반지름만큼 팽창시킨다. 
-'''
-'''
-# 자율주행중 맵 탐색에서 장애물 발견시 경로 조정에 관여하는 함수(2025_06_24)
-def create_cost_map(original_maze: list, grid_size: int, penalty: int = 130, influence_radius: int = 4) -> list:
-    cost_map = [[0] * grid_size for _ in range(grid_size)]
-    obstacles = [(r, c) for r in range(grid_size) for c in range(grid_size) if original_maze[r][c] == 1]
-    for r_obs, c_obs in obstacles:
-        for dr in range(-influence_radius, influence_radius + 1):
-            for dc in range(-influence_radius, influence_radius + 1):
-                nr, nc = r_obs + dr, c_obs + dc
-                if 0 <= nr < grid_size and 0 <= nc < grid_size and original_maze[nr][nc] == 0:
-                    distance = max(abs(dr), abs(dc))
-                    if distance == 0: continue
-                    current_penalty = penalty / distance
-                    cost_map[nr][nc] = max(cost_map[nr][nc], current_penalty)
-    return cost_map
-    '''
-'''
-장애물을 회피하여 더 좋은 경로(원하는 경로)에 도달하기 위해서 penalty를 부과하는 함수
-장애물 주변에 거리가 멀어지면 penalty값이 감소하여 penalty가 적은 방향으로 움직이게 한다.
-'''
 
 def world_to_grid(x: float, z: float) -> tuple:
     """
@@ -405,7 +359,7 @@ def _process_yolo_detection(image_file):
                 # 결과 데이터를 리스트에 추가합니다.
                 filtered_results.append({
                     'className': target_classes[class_id], 'bbox': [float(c) for c in box[:4]],
-                    'confidence': float(box[4]), 'color': '#00FF00', 'filled': False, 'updateBoxWhileMoving': True
+                    'confidence': float(box[4]), 'color': "#00BE00", 'filled': True, 'updateBoxWhileMoving': True
                 })
         return filtered_results
     finally:
@@ -442,14 +396,6 @@ def _find_distance_for_detection(detection, lidar_points, state, cone_width=3.0)
         return min(matching_dists)
     else:
         return None
-'''
-YOLO + 라이다 => 객체의 이름정보를 알고 있는 YOLO + 객체가 있고 그 거리값을 아는 Lidar
-좌우각도계산 : bbox를 기준으로 중앙을 기준으로 잡음; 각도는 -0.5~0.5로 정규화
-             수평시야각과 곱하여 화면 중앙을 기준으로 실제 각도 차이 계산
-거리계산 : 적의 방향과 일치히는 Lidar점들의 거리를 목록에 담고 유효하지 않은 점은 제외
-          -> 각도차이를 계산하여 3도 이내면 가져온 거리값이 true이고 이를 matching_dists목록에 추가
-          그중 가장 짧은 거리를 반환, 일치하는 점이 없다면 None을 반환
-'''
 
 def _log_data(filepath, data):
     """주어진 데이터를 지정된 파일에 JSON 형태로 로그를 남깁니다."""
@@ -539,14 +485,19 @@ def get_status():
             "destroyed": destroyed_count,
             "total": TOTAL_ENEMY_COUNT,
             "remaining": remaining
-        }
+        },
+        "lidarPoints": last_lidar_data.get('lidarPoints', [])
     })
 
 #갱신한 상태 변수들을 계기판에 기재하기 위한 API(2025_06_24)
 @app.route('/dashboard')
 def show_dashboard():
     return render_template('dashboard.html')
-    
+
+@app.route('/video')
+def dashboard_video():
+    return render_template('visual.html')
+     
 @app.route('/detect', methods=['POST'])
 def detect():
     """메인 탐지 로직: 이미지와 LiDAR 데이터를 융합하여 적의 거리를 계산합니다."""
@@ -681,13 +632,13 @@ def get_action():
         phi_t, dist_t = target['phi'], target['distance']
         desired_pitch = calculate_target_pitch(dist_t) + PITCH_AIM_OFFSET_DEG
         delta_yaw = ((phi_t - turret_yaw_current + 180) % 360) - 180
-        # 작은 각도로 반환되게 계산 (오른쪽으로 320도 = 왼쪽으로 40도)
         delta_pitch = desired_pitch - current_turret_pitch
         
         # log에 detecting된 전차와의 거리 및 각도 출력 (2025_06_19)
         print(f"  적 전차 거리: {dist_t:.2f}")
         print(f"  목표 pitch 각도: {desired_pitch:.2f}")
         print(f"  현재 yaw: {turret_yaw_current:.2f}, 현재 pitch: {current_turret_pitch:.2f}")
+        print(f"  yaw 조절 필요값 (delta_yaw): {delta_yaw:.2f}")
 
         # 조준 안정화
         close_enough = (abs(delta_yaw) <= FIRE_THRESHOLD_DEG * 3) and (abs(delta_pitch) <= PITCH_FIRE_THRESHOLD_DEG * 5)
@@ -741,13 +692,14 @@ def get_action():
             # TURRQE 축(E/Q)로 회전 명령
             cmd['turretQE'] = {
                 'command': 'E' if diff > 0 else 'Q',
-                'weight': min(abs(diff) / 45.0, 1.5) # 터렛정렬 속도 증가 (0624)
+                'weight': min(abs(diff) / 45.0, 1.5) # 터렛정렬 속도 증가 _0624
             }
         
         return jsonify(cmd)
     # --- B) 자율주행: 목표 미도달 시 ------------------------------------------------------
     elif not goal_reached:
         dest_x, dest_z = DESTINATIONS[current_dest_index]
+
         dist_to_goal = math.hypot(x - dest_x, z - dest_z)
 
         # 목표에 가까워지면 인덱스 혹은 완료
@@ -769,6 +721,8 @@ def get_action():
         start = world_to_grid(x, z)
         goal  = world_to_grid(dest_x, dest_z)
         path  = a_star(start, goal)
+        print(f"[INFO] 다음 5개의 목표좌표는 [ {path[:5]} ] 입니다.")
+        print(f"[INFO] 최종목표는 X좌표 : {dest_x}, Z좌표 : {dest_z} 입니다.")
         next_cell = path[1] if len(path) > 1 else start
         target_yaw = calculate_angle(start, next_cell)
         diff = ((target_yaw - device_yaw + 180) % 360) - 180
@@ -860,13 +814,6 @@ def update_obstacle():
         i,j=world_to_grid(float(x),float(z))
         maze[i][j]=1
     return jsonify({'status':'ok'})
-'''
-장애물의 좌표를 1로 변경하여 장애물로 영구하게 기록한다. (지도를 만든다고 생각)
-네비게이션과 같음 - a*시작후 또는 주행중에 map에서 장애물의 위치를 실시간으로 받아온다.
-[ 특징 ]
-1. 정보가 계속해서 갱신되며 실시간으로 최적경로가 변경된다.
-2. 장애물이 있는 부근을 지나기 전까지는 그 존재를 알 수 없다.
-'''
 
 @app.route('/collision', methods=['POST'])
 def collision():
@@ -888,7 +835,7 @@ def update_bullet():
         return jsonify({"status": "ERROR", "message": "Invalid request data"}), 400
 
     hit = data.get('hit')
-    print(f"Bullet Impact at X={data.get('x')}, Y={data.get('y')}, Z={data.get('z')}, Target={hit}")
+    print(f"💥 Bullet Impact at X={data.get('x')}, Y={data.get('y')}, Z={data.get('z')}, Target={hit}")
 
     # 만약 hit 값이 'Tank...' 형식이라면 이 ID를 파괴된 것으로 추가(2025_06_24)
     if isinstance(hit, str) and hit.startswith("Tank"):
