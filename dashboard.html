@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>전차 실시간 계기판</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background-color: #121212;
+      color: #f0f0f0;
+      margin: 0;
+      padding: 20px;
+    }
+    h2 {
+      font-size: 45px;
+      text-align: center;
+      color: #00d1b2;
+    }
+    .dashboard-top {
+      display: grid;
+      grid-template-columns: 1fr; /* 한 줄에 한 칸 */
+      gap: 10px;
+      padding: 0;
+      width: 100%;
+    }
+    .card {
+      background-color: #1e1e1e;
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      transition: transform 0.2s;
+      text-align: center;
+    }
+    .card:hover {
+      transform: translateY(-3px);
+    }
+    .label {
+      font-size: 30px;
+      color: #999;
+      text-align: center;
+    }
+    .value {
+      font-size: 30px;
+      font-weight: bold;
+      margin-top: 5px;
+      color: #00ffd5;
+      text-align: center;
+    }
+    .progress-ticks {
+      display: flex;
+      gap: 4px;
+      margin-top: 10px;
+      justify-content: center;
+    }
+    .tick { flex: 1; height: 20px; background-color: #444; border-radius: 4px; transition: background-color 0.3s; }
+    .tick.filled { background-color: #ff0000; }
+    .tick.completed { background-color: #88fd98; }
+    .tank-icons { display: flex; gap: 12px; justify-content: center; align-items: center; margin-top: 10px; }
+    .tank-icon { font-size: 40px; transition: color 0.3s; color: #444; text-align: center; line-height: 1; }
+    .tank-icon.dead { color: #ff4c4c; }
+  </style>
+</head>
+<body>
+  <h2>전차 실시간 계기판</h2>
+  <div class="dashboard-top">
+    <div class="card"><div class="label">속도</div><div class="value"><span id="speed">--</span> km/h</div></div>
+    <div class="card"><div class="label">위치</div><div class="value" id="position">--</div></div>
+    <div class="card"><div class="label">남은 거리</div><div class="value" id="distance_to_destination">--</div></div>
+    <div class="card">
+      <div class="label">발사</div>
+      <div class="value" id="can_fire">--</div>
+      <div class="progress-ticks" id="tickContainer">
+        <div class="tick"></div><div class="tick"></div><div class="tick"></div><div class="tick"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">전투 현황</div>
+      <div class="tank-icons" id="tankIcons"></div>
+      <div class="value" style="margin-top:10px;">
+        격파: <span id="enemy_destroyed">--</span> / <span id="enemy_total">--</span>
+        <div style="font-size:14px;margin-top:5px;text-align:center;">남은 적: <span id="enemy_remaining">--</span></div>
+      </div>
+    </div>
+  </div>
+  <script>
+    let reloading = false;
+let reloadingStartTime = null;
+let prevCanFire = null;
+
+async function fetchStatus() {
+  try {
+    const res = await fetch('/status');
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+
+    // 속도, 위치, 거리 표시
+    document.getElementById('speed').innerText = data.speed.toFixed(2);
+    document.getElementById('position').innerText = `[${data.position.x.toFixed(1)}] - [${data.position.z.toFixed(1)}]`;
+    const dx = data.destination.x - data.position.x;
+    const dz = data.destination.z - data.position.z;
+    document.getElementById('distance_to_destination').innerText = `${Math.hypot(dx, dz).toFixed(1)} m`;
+
+    const canFireText = document.getElementById('can_fire');
+    const ticks = document.querySelectorAll('.tick');
+
+    // === 장전 상태 동기화 ===
+    if (data.can_fire) {
+      reloading = false;
+      reloadingStartTime = null;
+      canFireText.innerText = 'Ready';
+      ticks.forEach(t => {
+        t.classList.remove('filled');
+        t.classList.add('completed');
+      });
+    } else if (!data.can_fire && prevCanFire !== false) {
+      reloading = true;
+      reloadingStartTime = Date.now();
+      canFireText.innerText = 'Reloading...';
+      ticks.forEach(t => {
+        t.classList.remove('completed');
+        t.classList.remove('filled');
+      });
+    }
+
+    prevCanFire = data.can_fire;
+
+    // === 적 정보 ===
+    if (data.enemy_status) {
+      const { destroyed, total } = data.enemy_status;
+      const remaining = total - destroyed;
+      document.getElementById('enemy_destroyed').innerText = destroyed;
+      document.getElementById('enemy_total').innerText = total;
+      document.getElementById('enemy_remaining').innerText = remaining;
+      initTankIcons(remaining);
+    }
+
+  } catch (e) {
+    console.error('Status fetch failed:', e);
+  }
+}
+    function initTankIcons(count) {
+      const container = document.getElementById('tankIcons');
+      container.innerHTML = '';
+      for (let i = 0; i < count; i++) {
+        const span = document.createElement('span'); span.className = 'tank-icon'; span.textContent = '🚚'; container.appendChild(span);
+      }
+    }
+    function updateReloadProgress() {
+      const ticks = document.querySelectorAll('.tick');
+      if (reloading && reloadingStartTime) {
+        const elapsed = (Date.now() - reloadingStartTime) / 1000;
+        const filledCount = Math.min(Math.floor(elapsed), 4);
+        ticks.forEach((t,i) => { t.classList.toggle('filled', i < filledCount); t.classList.remove('completed'); });
+        if (elapsed >= RELOAD_DURATION) {
+          reloading = false; reloadingStartTime = null;
+          ticks.forEach(t => { t.classList.remove('filled'); t.classList.add('completed'); });
+          document.getElementById('can_fire').innerText = 'Ready';
+        }
+      }
+    }
+    fetchStatus();
+    setInterval(fetchStatus, 500);
+    setInterval(updateReloadProgress, 100);
+  </script>
+</body>
+</html>
